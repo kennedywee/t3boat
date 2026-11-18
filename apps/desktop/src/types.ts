@@ -51,6 +51,8 @@ export interface Countdown {
 
 export interface Settings {
   startAtLogin: boolean;
+  /** GitHub owner/name of the fleet repo every machine pulls and installs; null for none */
+  fleetRepo: string | null;
 }
 
 export interface Size {

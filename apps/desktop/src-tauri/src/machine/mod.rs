@@ -537,10 +537,16 @@ impl MachineRuntime {
         Ok(())
     }
 
-    /// Keeps the machine on the desktop app's T3 version and on this app's scripts.
+    /// The fleet repo machines pull, from the app's settings.
+    fn fleet_repo(&self) -> Option<String> {
+        self.shared.settings.read().unwrap().fleet_repo.clone()
+    }
+
+    /// Keeps the machine on the desktop app's T3 version, this app's scripts and the fleet setting.
     pub async fn upgrade_if_needed(&self) -> Result<()> {
         let desktop = self.shared.t3.version().await?;
-        let revision = provision::revision();
+        let fleet = self.fleet_repo();
+        let revision = provision::revision(fleet.as_deref());
         let record = self.record();
         let new_server = desktop != record.t3_version;
         if !new_server && revision == record.provision_revision {
@@ -555,6 +561,7 @@ impl MachineRuntime {
             &record.watchdog_secret,
             &provision::snapshot_name(&record.name, &record.id),
             false,
+            fleet.as_deref(),
         )
         .await?;
         self.update_record(|m| {
@@ -708,7 +715,7 @@ impl MachineRuntime {
         self.ensure_awake().await?;
         // Older scripts lack keep-awake: take this app's now, which restarts T3, so never
         // mid-turn. Ending a hold works with any watchdog that has one.
-        if minutes != Some(0) && self.record().provision_revision != provision::revision() {
+        if minutes != Some(0) && self.record().provision_revision != provision::revision(self.fleet_repo().as_deref()) {
             if self.watchdog_get("/status?fresh").await?.busy {
                 bail!("needs a quick update first; try again once its agents finish");
             }

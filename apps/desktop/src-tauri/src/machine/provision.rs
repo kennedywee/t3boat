@@ -13,10 +13,26 @@ const WATCHDOG_MJS: &str = include_str!("watchdog.mjs");
 const T3_PORT: u16 = 3773;
 const WATCHDOG_PORT: u16 = 3774;
 
-/// Identifies the provisioning scripts; a machine provisioned with others gets them on wake.
-pub fn revision() -> String {
-    let hash = fnv1a(PROVISION_SH.bytes().chain(WATCHDOG_MJS.bytes()).chain(SLEEP_AFTER_SECS.to_string().bytes()));
+/// Identifies the provisioning scripts and the fleet repo; a machine provisioned with others gets
+/// them on wake, so a changed fleet setting reaches every machine.
+pub fn revision(fleet: Option<&str>) -> String {
+    let hash = fnv1a(
+        PROVISION_SH
+            .bytes()
+            .chain(WATCHDOG_MJS.bytes())
+            .chain(SLEEP_AFTER_SECS.to_string().bytes())
+            .chain(fleet.unwrap_or_default().bytes()),
+    );
     format!("{hash:016x}")
+}
+
+/// The fleet repo as `provision.sh` takes it: `owner/name`, or `-` for none.
+fn fleet_word(fleet: Option<&str>) -> Result<&str> {
+    match fleet {
+        None => Ok("-"),
+        Some(repo) if crate::store::valid_fleet_repo(repo) => Ok(repo),
+        Some(repo) => bail!("not a GitHub owner/name: {repo}"),
+    }
 }
 
 /// FNV-1a: stable across builds, unlike std's hasher.
@@ -78,12 +94,13 @@ pub async fn run(
     watchdog_secret: &str,
     snapshot: &str,
     mint_upstream_token: bool,
+    fleet: Option<&str>,
 ) -> Result<Provisioned> {
     let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
     let script = format!(
         "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
          echo {p} | base64 -d > \"$d/provision.sh\"; echo {w} | base64 -d > \"$d/watchdog.mjs\"\n\
-         T3BOAT_SECRET={s} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name}\n",
+         T3BOAT_SECRET={s} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet}\n",
         p = b64(PROVISION_SH),
         w = b64(WATCHDOG_MJS),
         v = shell_word(t3_version)?,
@@ -92,6 +109,7 @@ pub async fn run(
         snapshot = shell_word(snapshot)?,
         mint = u8::from(mint_upstream_token),
         name = shell_word(name)?,
+        fleet = fleet_word(fleet)?,
     );
     let name = format!("t3boat-provision-{}.sh", random_token());
     let local = std::env::temp_dir().join(&name);
@@ -131,6 +149,7 @@ pub async fn create(
     size: &str,
     t3_version: &str,
     local_port: u16,
+    fleet: Option<&str>,
     created: impl FnOnce(&str),
     progress: impl Fn(&str),
 ) -> Result<Machine> {
@@ -143,7 +162,7 @@ pub async fn create(
     created(&id);
     progress("Installing T3 Code");
     let secret = random_token();
-    let provisioned = run(boat, &id, name, t3_version, &secret, &snapshot_name(name, &id), true).await?;
+    let provisioned = run(boat, &id, name, t3_version, &secret, &snapshot_name(name, &id), true, fleet).await?;
     progress("Opening the machine's address");
     let (upstream_url, watchdog_url) = host(boat, &id).await?;
     Ok(Machine {
@@ -159,7 +178,7 @@ pub async fn create(
         watchdog_secret: secret,
         local_port,
         t3_version: t3_version.to_owned(),
-        provision_revision: revision(),
+        provision_revision: revision(fleet),
         environment_id: provisioned.environment_id,
         client_tokens: Vec::new(),
         link_tokens: Vec::new(),

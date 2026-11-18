@@ -106,7 +106,7 @@ function seed(): UiState {
     account: { identifier: "you@example.com", plan: "Pro" },
     machines: structuredClone(machines),
     costs: { today: 0.42, month: 12.8, startsToday: 3, startsLimit: 50 },
-    settings: { startAtLogin: true },
+    settings: { startAtLogin: true, fleetRepo: null },
     mcp: params.get("mcp") === "mixed" ? { claudeCode: true, codex: null } : { claudeCode: false, codex: false },
     sizes: [
       { id: "small", spec: "2 vCPU · 4 GB", hourly: 0.018 },

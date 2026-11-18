@@ -5,6 +5,50 @@ import { Icon } from "./Icons";
 import { Dots } from "./common";
 import { SubHeader } from "./SubHeader";
 
+/** A GitHub owner/name, as the backend accepts it. */
+const FLEET_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]*\/[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
+
+/** Saved on Enter or when the field loses focus: each change re-provisions machines on wake. */
+function FleetRepo({ value, onSave }: { value: string; onSave: (repo: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const repo = draft.trim();
+  const valid = repo === "" || FLEET_RE.test(repo);
+  const commit = () => {
+    if (valid && repo !== value) onSave(repo);
+  };
+  return (
+    <div className="setting field">
+      <span className="caption">fleet</span>
+      <label className="setting-name" htmlFor="fleet-repo">
+        Fleet repo
+      </label>
+      <span className="prompt-input">
+        <span className="prompt-sign" aria-hidden>
+          gh
+        </span>
+        <input
+          id="fleet-repo"
+          value={draft}
+          placeholder="owner/name"
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => e.key === "Enter" && commit()}
+          spellCheck={false}
+          autoComplete="off"
+          aria-invalid={!valid}
+          aria-describedby="fleet-repo-hint"
+        />
+      </span>
+      <span id="fleet-repo-hint" className={`hint${valid ? "" : " is-error"}`}>
+        {valid
+          ? "Skills and agent setup every machine pulls and installs: at wake and every 15 minutes. Empty: none."
+          : "Use a GitHub owner/name, like kennedywee/fleet."}
+      </span>
+    </div>
+  );
+}
+
 const CLIENTS: { id: McpClient; name: string }[] = [
   { id: "claudeCode", name: "Claude Code" },
   { id: "codex", name: "Codex" },
@@ -59,6 +103,7 @@ export function SettingsView({ state, onSave, onAddMcp, onQuit, onBack }: Props)
             onChange={(e) => change({ startAtLogin: e.target.checked })}
           />
         </label>
+        <FleetRepo value={s.fleetRepo ?? ""} onSave={(repo) => change({ fleetRepo: repo || null })} />
         <div className="setting">
           <span className="caption">mcp</span>
           <span className="setting-name">

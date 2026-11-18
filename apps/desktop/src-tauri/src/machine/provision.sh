@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Runs on a Boat sandbox, as `user`. Idempotent; also used to upgrade a machine.
-#   T3BOAT_SECRET=<watchdog-secret> provision.sh <t3-version> <sleep-after-secs> <snapshot-name> <mint-upstream-token:0|1> <name>
+#   T3BOAT_SECRET=<watchdog-secret> provision.sh <t3-version> <sleep-after-secs> <snapshot-name> <mint-upstream-token:0|1> <name> <fleet-repo|->
 # Expects watchdog.mjs next to it. Prints one JSON line: {"environmentId", "upstreamToken"?}.
 set -euo pipefail
 
-version="$1" sleep_after="$2" snapshot="$3" mint_upstream="$4" name="$5"
+version="$1" sleep_after="$2" snapshot="$3" mint_upstream="$4" name="$5" fleet="${6:--}"
 secret="$T3BOAT_SECRET"
 here="$(cd "$(dirname "$0")" && pwd)"
 t3="$HOME/.local/bin/t3"
@@ -102,6 +102,76 @@ UNIT
 systemctl --user daemon-reload
 systemctl --user enable t3boat-watchdog.service >/dev/null 2>&1
 systemctl --user restart t3boat-watchdog.service
+
+# Fleet: the user's skills and agent setup (t3boat's "Fleet repo" setting, `-` for none). A timer
+# pulls it 30 s after boot and every 15 minutes and runs its install.sh, so a pushed change reaches
+# the machine with no re-provision. Boat signs git in to GitHub a moment after a resume, so a
+# failed sync retries.
+cat >"$boat_dir/fleet-sync.sh" <<'SYNC'
+#!/usr/bin/env bash
+# t3boat: keeps ~/fleet current and installed. Run by t3boat-fleet.timer; logs to ~/.t3boat/fleet.log.
+set -uo pipefail
+boat_dir="$HOME/.t3boat"
+repo="$(cat "$boat_dir/fleet-repo" 2>/dev/null || true)"
+[ -n "$repo" ] && [ "$repo" != "-" ] || exit 0
+dir="$HOME/fleet" url="https://github.com/$repo.git" log="$boat_dir/fleet.log"
+export GIT_TERMINAL_PROMPT=0
+say() { echo "$(date -Is) $*" >>"$log"; }
+[ -f "$log" ] && tail -n 400 "$log" >"$log.tmp" && mv "$log.tmp" "$log"
+# The URL as written, not as rewritten by git's insteadOf rules.
+if [ -d "$dir/.git" ] && [ "$(git -C "$dir" config --get remote.origin.url 2>/dev/null)" != "$url" ]; then
+  aside="$dir.old.$(date +%s).$$"
+  mv "$dir" "$aside" || { say "could not move $dir aside"; exit 1; }
+  say "fleet repo is now $repo: the old checkout is in $aside"
+fi
+if [ ! -d "$dir/.git" ]; then
+  git clone -q "$url" "$dir" 2>>"$log" || { say "clone of $repo failed"; exit 1; }
+else
+  git -C "$dir" pull -q --ff-only 2>>"$log" || { say "pull of $repo failed"; exit 1; }
+fi
+head="$(git -C "$dir" rev-parse HEAD)"
+# Nothing new since the last install: skip it (it checks plugins, which takes a while).
+[ "$head" = "$(cat "$boat_dir/fleet-installed" 2>/dev/null || true)" ] && exit 0
+bash "$dir/install.sh" >>"$log" 2>&1 || { say "install.sh failed at ${head:0:7}"; exit 1; }
+echo "$head" >"$boat_dir/fleet-installed"
+say "installed $repo at ${head:0:7}"
+SYNC
+chmod 700 "$boat_dir/fleet-sync.sh"
+cat >"$units/t3boat-fleet.service" <<'UNIT'
+[Unit]
+Description=t3boat fleet: pull the fleet repo and install it
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'exec %h/.t3boat/fleet-sync.sh'
+Restart=on-failure
+RestartSec=120
+UNIT
+cat >"$units/t3boat-fleet.timer" <<'UNIT'
+[Unit]
+Description=t3boat fleet: sync at boot and every 15 minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl --user daemon-reload
+if [ "$fleet" = "-" ]; then
+  rm -f "$boat_dir/fleet-repo" "$boat_dir/fleet-installed"
+  systemctl --user disable --now t3boat-fleet.timer >/dev/null 2>&1 || true
+else
+  if [ "$(cat "$boat_dir/fleet-repo" 2>/dev/null || true)" != "$fleet" ]; then
+    echo "$fleet" >"$boat_dir/fleet-repo"
+    rm -f "$boat_dir/fleet-installed"
+  fi
+  systemctl --user enable --now t3boat-fleet.timer >/dev/null 2>&1
+  # Now, not in 15 minutes; without waiting, so provisioning is not held up by a clone.
+  systemctl --user start --no-block t3boat-fleet.service
+fi
 
 upstream_token=""
 if [ "$mint_upstream" = 1 ]; then

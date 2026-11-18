@@ -56,11 +56,38 @@ pub struct LinkToken {
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub start_at_login: bool,
+    /// The user's fleet repo on GitHub (`owner/name`): skills and agent setup every machine pulls
+    /// and installs with its `install.sh`. `None`: machines get no fleet.
+    pub fleet_repo: Option<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { start_at_login: true }
+        Self { start_at_login: true, fleet_repo: None }
+    }
+}
+
+/// Whether `repo` is a GitHub `owner/name`, the only shape that reaches a machine's shell.
+pub fn valid_fleet_repo(repo: &str) -> bool {
+    let ok = |part: &str| {
+        !part.is_empty()
+            && !part.starts_with('.')
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    matches!(repo.split_once('/'), Some((owner, name)) if ok(owner) && ok(name))
+}
+
+#[cfg(test)]
+mod fleet_repo_tests {
+    use super::valid_fleet_repo;
+
+    #[test]
+    fn accepts_only_owner_slash_name() {
+        assert!(valid_fleet_repo("kennedywee/fleet"));
+        assert!(valid_fleet_repo("some-org/agent.skills_2"));
+        for bad in ["fleet", "a/b/c", "/fleet", "kennedywee/", "../x", "a/..", "a/b c", "a/b;rm", "a/$(x)"] {
+            assert!(!valid_fleet_repo(bad), "{bad}");
+        }
     }
 }
 

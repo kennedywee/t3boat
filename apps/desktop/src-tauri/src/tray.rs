@@ -509,8 +509,15 @@ async fn delete_machine(ui: State<'_, Ui>, id: String, discard: Option<bool>) ->
 }
 
 #[tauri::command]
-async fn update_settings(handle: AppHandle, ui: State<'_, Ui>, settings: Settings) -> Res {
+async fn update_settings(handle: AppHandle, ui: State<'_, Ui>, mut settings: Settings) -> Res {
     let app = ui.app()?;
+    // An empty field means no fleet; anything else must be a GitHub owner/name.
+    settings.fleet_repo = settings.fleet_repo.map(|r| r.trim().to_owned()).filter(|r| !r.is_empty());
+    if let Some(repo) = &settings.fleet_repo {
+        if !crate::store::valid_fleet_repo(repo) {
+            return Err(format!("Fleet repo must be a GitHub owner/name, like kennedywee/fleet: {repo}"));
+        }
+    }
     if app.settings().start_at_login != settings.start_at_login {
         apply_autostart(&handle, settings.start_at_login).map_err(|e| format!("Couldn't change start at login: {e}"))?;
     }

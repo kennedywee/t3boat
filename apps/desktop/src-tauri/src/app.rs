@@ -354,6 +354,7 @@ impl App {
                 size,
                 &version,
                 port,
+                self.settings().fleet_repo.as_deref(),
                 |sandbox| self.set_creating_sandbox(name, sandbox),
                 |step| self.set_creating_step(name, step),
             )
