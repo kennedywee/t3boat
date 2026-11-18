@@ -41,6 +41,7 @@ sha2 = "0.10"
 [target.'cfg(target_os = "linux")'.dependencies]
 gdkx11 = "0.18"
 gtk = "0.18"
+ksni = { version = "0.3.7", default-features = false, features = ["tokio"] }
 
 [profile.release]
 codegen-units = 1

@@ -12,7 +12,9 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[cfg(not(target_os = "linux"))]
 use tauri::menu::{Menu, MenuItem};
+#[cfg(not(target_os = "linux"))]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
@@ -120,8 +122,8 @@ fn emit_state(handle: &AppHandle) {
     let _ = handle.emit("state", state);
 }
 
+#[cfg_attr(target_os = "linux", allow(unused_variables))]
 fn update_tray(handle: &AppHandle, state: &UiState) {
-    let Some(tray) = handle.tray_by_id("main") else { return };
     let working = state.machines.iter().filter(|m| m.state == MachineState::Working).count();
     let awake = state
         .machines
@@ -133,7 +135,12 @@ fn update_tray(handle: &AppHandle, state: &UiState) {
         (0, n) => format!("t3boat · {n} awake"),
         (w, _) => format!("t3boat · {w} working"),
     };
-    let _ = tray.set_tooltip(Some(tip));
+    #[cfg(target_os = "linux")]
+    crate::linux_tray::set_tooltip(tip);
+    #[cfg(not(target_os = "linux"))]
+    if let Some(tray) = handle.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(tip));
+    }
 }
 
 /// Checks the user's Boat and T3 Code installs; starts the app model once both are there.
@@ -617,9 +624,20 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Linux: a tray item that opens the panel on a left click; see `linux_tray`.
+            #[cfg(target_os = "linux")]
+            crate::linux_tray::spawn(
+                app.handle(),
+                TRAY_ICON,
+                crate::linux_tray::Actions { toggle: |h| toggle_panel(h, None) },
+            );
+            #[cfg(not(target_os = "linux"))]
             let open = MenuItem::with_id(app, "open", "Open t3boat", true, None::<&str>)?;
+            #[cfg(not(target_os = "linux"))]
             let quit = MenuItem::with_id(app, "quit", "Quit t3boat", true, None::<&str>)?;
+            #[cfg(not(target_os = "linux"))]
             let menu = Menu::with_items(app, &[&open, &quit])?;
+            #[cfg(not(target_os = "linux"))]
             TrayIconBuilder::with_id("main")
                 .icon(tauri::image::Image::from_bytes(TRAY_ICON)?)
                 .icon_as_template(true)

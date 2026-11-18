@@ -1,6 +1,8 @@
 pub mod app;
 pub mod boat;
 pub mod machine;
+#[cfg(target_os = "linux")]
+mod linux_tray;
 pub mod mcp;
 mod omarchy;
 pub mod process;
