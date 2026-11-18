@@ -55,9 +55,9 @@ pub fn size(id: &str) -> Result<&'static SizeInfo> {
 /// cost under a cent even on the large size.
 pub const SLEEP_AFTER_SECS: u64 = 300;
 
-/// The machine's sandbox, as Boat lists it.
+/// The machine's sandbox, as Boat lists it: `t3boat_jett`.
 pub fn sandbox_name(name: &str) -> String {
-    format!("t3boat · {name}")
+    format!("t3boat_{name}")
 }
 
 /// The saved snapshot the watchdog replaces at every sleep. Boat deletes a stopped sandbox's
