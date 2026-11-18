@@ -41,6 +41,20 @@ if [ "$(cat /etc/machine-info 2>/dev/null || true)" != "$machine_info" ]; then
   echo "$machine_info" | sudo tee /etc/machine-info >/dev/null
   restart_t3=1
 fi
+# Git's author, so agents can commit: the GitHub account Boat signed the sandbox in to, with
+# GitHub's noreply address (what GitHub itself uses when an email is private). It goes in git's
+# XDG config, which Boat leaves alone; an author already set anywhere is kept.
+if ! git config --global user.email >/dev/null 2>&1; then
+  if gh_user="$(gh api user --jq '[.id, .login, (.name // .login)] | @tsv' 2>/dev/null)"; then
+    IFS=$'\t' read -r gh_id gh_login gh_name <<<"$gh_user"
+    if [ -n "${gh_id:-}" ] && [ -n "${gh_login:-}" ]; then
+      mkdir -p "$HOME/.config/git"
+      git config --file "$HOME/.config/git/config" user.name "${gh_name:-$gh_login}"
+      git config --file "$HOME/.config/git/config" user.email "${gh_id}+${gh_login}@users.noreply.github.com"
+    fi
+  fi
+fi
+
 "$t3" service install --allow-downgrade >/dev/null
 systemctl --user daemon-reload
 systemctl --user is-active --quiet t3code.service || restart_t3=1
