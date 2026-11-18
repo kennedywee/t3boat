@@ -106,3 +106,14 @@ const dark: Palette = {
 };
 
 export const palettes: Record<Theme, Palette> = { light, dark };
+
+/** A palette that replaces both of t3boat's own (the Omarchy theme's); `null` for t3boat's. */
+let override: Palette | null = null;
+
+export function setPaletteOverride(p: Palette | null) {
+  override = p;
+}
+
+export function paletteFor(theme: Theme): Palette {
+  return override ?? palettes[theme];
+}

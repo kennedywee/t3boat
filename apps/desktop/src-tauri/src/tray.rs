@@ -421,6 +421,12 @@ async fn add_project(ui: State<'_, Ui>, id: String, project_id: String) -> Res {
     app.add_project(&machine, &project_id).await.map(drop).map_err(err)
 }
 
+/// The Omarchy theme to follow; `null` elsewhere. Later themes arrive as "omarchy-theme".
+#[tauri::command]
+fn omarchy_theme() -> Option<omarchy::Theme> {
+    omarchy::current_theme()
+}
+
 /// The Boat account's sandboxes that t3boat did not create.
 #[tauri::command]
 async fn other_sandboxes(ui: State<'_, Ui>) -> Res<Vec<crate::boat::SandboxSummary>> {
@@ -604,6 +610,7 @@ pub fn run() {
             add_project,
             other_sandboxes,
             set_sandbox_running,
+            omarchy_theme,
             wake_machine,
             sleep_machine,
             open_machine,
@@ -684,6 +691,7 @@ pub fn run() {
             }
             #[cfg(target_os = "linux")]
             follow_tray_host(app.handle());
+            omarchy::watch_theme(app.handle().clone());
             tauri::async_runtime::spawn(init(app.handle().clone()));
             Ok(())
         })

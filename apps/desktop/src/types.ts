@@ -102,8 +102,19 @@ export interface BoatSandbox {
   createdAt: string | null;
 }
 
+/** The theme Omarchy applied, from its colors.toml. */
+export interface OmarchyTheme {
+  name: string;
+  mode: "dark" | "light" | string;
+  /** colours by name: background, foreground, accent, blue, red, muted, … (#rrggbb) */
+  colors: Record<string, string>;
+  /** Omarchy's monospace font */
+  font: string | null;
+}
+
 export interface Commands {
   get_state: [undefined, UiState];
+  omarchy_theme: [undefined, OmarchyTheme | null];
   other_sandboxes: [undefined, BoatSandbox[]];
   set_sandbox_running: [{ id: string; running: boolean }, void]; // resolves once Boat has done it
   create_machine: [{ name: string; size: string; projects?: string[] }, void]; // projects: LocalProject ids to add once up

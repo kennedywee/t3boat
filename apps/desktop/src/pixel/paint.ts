@@ -3,7 +3,7 @@
 import type { MachineState } from "../types";
 import { seedOf } from "../machine";
 import { drawBoat, poseFor, type Anchor } from "./boat";
-import { palettes, type Theme } from "./palette";
+import { paletteFor, type Theme } from "./palette";
 import { CLEAR, hash, ramp, type Px } from "./px";
 import { drawScene } from "./scene";
 
@@ -56,7 +56,7 @@ export function seaFor(n: number, dpr: number, stripW: number = STRIP_W): Sea {
  * `sea.w`×`sea.h` buffer. Returns where each boat's mast top sits, in scene pixels, for its tag.
  */
 export function paintSea(px: Px, sea: Sea, theme: Theme, boats: { key: string; state: MachineState }[], t: number | null) {
-  const pal = palettes[theme];
+  const pal = paletteFor(theme);
   const time = t ?? 0;
   drawScene(px, 2 / sea.scale, pal, theme, time);
   const anchors = new Map<string, Anchor>();
@@ -74,7 +74,7 @@ const WATERLINE = 17;
 
 /** Draws an `ICON_W`×`ICON_H` boat on its own patch of water at `t` seconds (`null`: still frame). */
 export function paintBoatIcon(px: Px, theme: Theme, state: MachineState, seed: number, t: number | null) {
-  const pal = palettes[theme];
+  const pal = paletteFor(theme);
   const time = t ?? 0;
   px.fill(CLEAR);
   const frame = Math.floor(time * 2 + seed * 10);

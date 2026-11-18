@@ -81,8 +81,30 @@ export function useDevicePixelRatio(): number {
   return useSyncExternalStore(dprStore.subscribe, dprStore.get, () => 1);
 }
 
+/** A theme that wins over the system's light/dark setting (the Omarchy theme's mode). */
+let forced: Theme | null = null;
+let forcedVersion = 0;
+const forcedSubs = new Set<() => void>();
+const forcedStore = {
+  subscribe: (cb: () => void) => {
+    forcedSubs.add(cb);
+    return () => forcedSubs.delete(cb);
+  },
+  // a version, not the mode: another theme with the same mode must repaint too
+  get: () => forcedVersion,
+};
+
+/** Sets the theme the pixel art draws in, or `null` to follow the system again. */
+export function forceTheme(theme: Theme | null) {
+  forced = theme;
+  forcedVersion += 1;
+  forcedSubs.forEach((cb) => cb());
+}
+
 export function useTheme(): Theme {
-  return useSyncExternalStore(darkStore.subscribe, darkStore.get, off) ? "dark" : "light";
+  useSyncExternalStore(forcedStore.subscribe, forcedStore.get, () => 0);
+  const dark = useSyncExternalStore(darkStore.subscribe, darkStore.get, off);
+  return forced ?? (dark ? "dark" : "light");
 }
 
 /**

@@ -220,6 +220,10 @@ function create(): MockBackend {
       set(null);
     },
 
+    async omarchy_theme() {
+      return null;
+    },
+
     async other_sandboxes() {
       await wait(400);
       return others.map((s) => ({ ...s }));
