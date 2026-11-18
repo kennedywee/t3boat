@@ -6,6 +6,7 @@ use crate::boat::Boat;
 use crate::machine::provision::{SizeInfo, SIZES};
 use crate::machine::Event;
 use crate::mcp;
+use crate::omarchy;
 use crate::store::Settings;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -234,10 +235,12 @@ fn windowed(handle: &AppHandle) -> bool {
 /// Shows the panel: under the tray icon, or as it was left when it is a window.
 fn open_panel(handle: &AppHandle, anchor: Option<Anchor>) {
     let Some(panel) = handle.get_webview_window(PANEL) else { return };
-    if !windowed(handle) {
+    // Hyprland places windows itself; see `omarchy`.
+    if !windowed(handle) && !omarchy::hyprland() {
         place_under_tray(handle, &panel, anchor);
     }
     show_focused(&panel);
+    omarchy::release_size(&panel);
     emit_state(handle);
     let handle = handle.clone();
     tauri::async_runtime::spawn(async move { refresh_mcp(&handle).await });
@@ -568,6 +571,7 @@ pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
         .init();
+    omarchy::prepare_env();
     tauri::Builder::default()
         // Launching t3boat again, from an app launcher say, shows it.
         .plugin(tauri_plugin_single_instance::init(|handle, _, _| open_panel(handle, None)))
@@ -630,8 +634,10 @@ pub fn run() {
             if let Some(panel) = app.get_webview_window(PANEL) {
                 let hide = panel.clone();
                 let handle = app.handle().clone();
+                omarchy::fit_panel(&panel);
                 // For screen recordings: keep the card up while clicking around other apps.
-                let keep_open = std::env::var_os("T3BOAT_KEEP_PANEL_OPEN").is_some();
+                // Also on Hyprland, where focus follows the mouse: see `omarchy`.
+                let keep_open = std::env::var_os("T3BOAT_KEEP_PANEL_OPEN").is_some() || omarchy::hyprland();
                 panel.on_window_event(move |e| match e {
                     WindowEvent::Focused(false) if !keep_open && !windowed(&handle) => {
                         let _ = hide.hide();

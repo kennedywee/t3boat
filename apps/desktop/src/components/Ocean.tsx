@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import type { MachineState } from "../types";
 import { useAnimation, useDevicePixelRatio, useReducedMotion, useTheme } from "../pixel/clock";
 import { Px } from "../pixel/px";
-import { paintSea, seaFor } from "../pixel/paint";
+import { paintSea, seaFor, STRIP_W } from "../pixel/paint";
 import { stateTag } from "../machine";
 
 export interface OceanBoat {
@@ -32,7 +32,24 @@ const FOLLOW_MARGIN = 40;
 /** Tags keep this far (CSS px) from the sea's ends, sliding off-centre from their boat if they must. */
 const TAG_INSET = 4;
 
+/** The element's width in whole CSS px, kept up to date as the window is resized. */
+function useWidth(el: RefObject<HTMLElement | null>, initial: number): number {
+  const [width, setWidth] = useState(initial);
+  useEffect(() => {
+    const node = el.current;
+    if (!node) return;
+    const measure = () => setWidth(Math.max(1, Math.round(node.clientWidth)));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [el]);
+  return width;
+}
+
 export function Ocean({ boats, active, compact, onPick, children }: Props) {
+  const strip = useRef<HTMLDivElement>(null);
+  const stripW = useWidth(strip, STRIP_W);
   const canvas = useRef<HTMLCanvasElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const buffer = useRef<Px | null>(null);
@@ -41,7 +58,7 @@ export function Ocean({ boats, active, compact, onPick, children }: Props) {
   const theme = useTheme();
   const reduced = useReducedMotion();
   const dpr = useDevicePixelRatio();
-  const sea = useMemo(() => seaFor(boats.length, dpr), [boats.length, dpr]);
+  const sea = useMemo(() => seaFor(boats.length, dpr, stripW), [boats.length, dpr, stripW]);
   const showAllTags = boats.length <= 4;
   const activeIndex = boats.findIndex((b) => b.key === active);
 
@@ -80,7 +97,7 @@ export function Ocean({ boats, active, compact, onPick, children }: Props) {
   }, [activeIndex, sea, reduced]);
 
   return (
-    <div className={`ocean${compact ? " is-compact" : ""}`}>
+    <div ref={strip} className={`ocean${compact ? " is-compact" : ""}`}>
       <div
         ref={scroller}
         className={`ocean-scroll${sea.scrolls ? " is-scrolling" : ""}`}

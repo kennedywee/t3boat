@@ -7,8 +7,8 @@ import { palettes, type Theme } from "./palette";
 import { CLEAR, hash, ramp, type Px } from "./px";
 import { drawScene } from "./scene";
 
-/** The sea strip's size in CSS px. */
-const STRIP_W = 380;
+/** The sea strip's size in CSS px: the panel's width, unless the window is resized. */
+export const STRIP_W = 380;
 const STRIP_H = 148;
 const MARGIN = 18; // scene px kept free of boats at either end
 const SLOT = 19; // scene px a boat needs; fewer and the sea zooms out, then scrolls
@@ -26,15 +26,15 @@ export interface Sea {
 }
 
 /**
- * Zoom and room for `n` boats on a `dpr` screen: as close up as they fit, zooming out
- * only in steps that keep pixels crisp, then a sea wider than the strip.
+ * Zoom and room for `n` boats on a `dpr` screen in a `stripW`-wide strip: as close up as
+ * they fit, zooming out only in steps that keep pixels crisp, then a sea wider than the strip.
  */
-export function seaFor(n: number, dpr: number): Sea {
+export function seaFor(n: number, dpr: number, stripW: number = STRIP_W): Sea {
   const scales = Number.isInteger(1.5 * dpr) ? [2, 1.5, 1] : [2, 1];
   const need = 2 * MARGIN + n * SLOT;
-  const scale = scales.find((s) => need <= Math.floor(STRIP_W / s)) ?? 1;
+  const scale = scales.find((s) => need <= Math.floor(stripW / s)) ?? 1;
   const k = 2 / scale;
-  const fit = Math.ceil(STRIP_W / scale);
+  const fit = Math.ceil(stripW / scale);
   const scrolls = need > fit;
   const w = scrolls ? 2 * MARGIN + n * SCROLL_SLOT : fit;
   const slot = (w - 2 * MARGIN) / n;

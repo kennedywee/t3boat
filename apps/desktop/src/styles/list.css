@@ -5,6 +5,10 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  /* a resized window keeps a readable column, centred under the full-width sea */
+  width: 100%;
+  max-width: var(--content-max);
+  margin-inline: auto;
   /* each screen mounts fresh: rise in alongside the sky sliding */
   animation: view-in var(--ocean-ease);
 }

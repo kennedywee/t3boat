@@ -4,6 +4,8 @@
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   flex: none;
+  /* full-width bar, its figures lined up with the content column above */
+  padding-inline: max(0px, calc((100% - var(--content-max)) / 2));
   background: var(--panel);
   border-top: 1px solid var(--line);
 }

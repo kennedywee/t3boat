@@ -2,6 +2,11 @@
   box-sizing: border-box;
 }
 
+:root {
+  /* widest the views grow in a resized window; the panel itself is 380px */
+  --content-max: 560px;
+}
+
 html,
 body,
 #root {
