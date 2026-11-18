@@ -174,13 +174,22 @@ export const hourly = (n: number) => `$${n < 0.1 ? n.toFixed(3) : n.toFixed(2)}/
 
 export const sizeOf = (sizes: Size[], id: string) => sizes.find((s) => s.id === id);
 
-const NAMES = ["skiff", "dinghy", "sloop", "ketch", "yawl", "cutter", "dory", "schooner", "clipper", "catboat", "junk", "brig"];
+/** Valorant agents, written as machine names allow (KAY/O is "kayo"). */
+const NAMES = [
+  "astra", "breach", "brimstone", "chamber", "clove", "cypher", "deadlock", "fade", "gekko", "harbor",
+  "iso", "jett", "kayo", "killjoy", "neon", "omen", "phoenix", "raze", "reyna", "sage", "skye", "sova",
+  "tejo", "viper", "vyse", "waylay", "yoru",
+];
 
+const pick = <T,>(list: T[]): T => list[Math.floor(Math.random() * list.length)];
+
+/** A random agent no machine is named after yet; once all are taken, one with a number. */
 export function suggestName(taken: string[]): string {
   const used = new Set(taken);
-  const free = NAMES.find((n) => !used.has(n));
-  if (free) return free;
-  for (let i = 2; ; i++) if (!used.has(`skiff-${i}`)) return `skiff-${i}`;
+  const free = NAMES.filter((n) => !used.has(n));
+  if (free.length > 0) return pick(free);
+  const base = pick(NAMES);
+  for (let i = 2; ; i++) if (!used.has(`${base}-${i}`)) return `${base}-${i}`;
 }
 
 export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
