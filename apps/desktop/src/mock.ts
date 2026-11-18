@@ -5,7 +5,7 @@
 // ?ready=1 (a new machine comes up in T3 Code with its agents signed in and acme on it, as the website shows it)
 import type { Backend } from "./api";
 import { timeLapse } from "./pixel/clock";
-import type { CommandArgs, CommandName, LocalProject, MachineDetails, MachineProject, MachineView, Setup, UiState } from "./types";
+import type { BoatSandbox, CommandArgs, CommandName, LocalProject, MachineDetails, MachineProject, MachineView, Setup, UiState } from "./types";
 
 const params = new URLSearchParams(location.search);
 
@@ -156,6 +156,15 @@ function create(): MockBackend {
 
   const setupOrder: Setup[] = ["installBoat", "signInBoat", "installT3", "ready"];
 
+  // sandboxes made outside t3boat (?others=0 for none)
+  const others: BoatSandbox[] =
+    new URLSearchParams(location.search).get("others") === "0"
+      ? []
+      : [
+          { id: "bx_yq5xkd3s", name: "alpha-trial", state: "stopped", type: "default", vcpu: 4, memoryGB: 8, createdAt: "2026-11-18T13:46:23Z" },
+          { id: "bx_k2m9qp7r", name: "scratch", state: "running", type: "small", vcpu: 2, memoryGB: 4, createdAt: "2026-11-17T09:12:00Z" },
+        ];
+
   const handlers: { [C in CommandName]: (a: CommandArgs<C>) => Promise<unknown> } = {
     get_state: async () => structuredClone(state),
 
@@ -209,6 +218,19 @@ function create(): MockBackend {
       set("Checking out files");
       await wait(600);
       set(null);
+    },
+
+    async other_sandboxes() {
+      await wait(400);
+      return others.map((s) => ({ ...s }));
+    },
+
+    async set_sandbox_running({ id, running }) {
+      const s = others.find((o) => o.id === id);
+      if (!s) throw `no sandbox ${id}`;
+      s.state = running ? "starting" : "stopping";
+      await wait(1800);
+      s.state = running ? "running" : "stopped";
     },
 
     async wake_machine({ id }) {

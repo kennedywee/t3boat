@@ -89,8 +89,23 @@ export interface MachineDetails {
 
 export type SetupAction = "installBoat" | "signInBoat" | "installT3" | "recheck";
 
+/** A sandbox on the Boat account that t3boat did not create, as `boat list` describes it. */
+export interface BoatSandbox {
+  id: string;
+  name: string | null;
+  /** Boat's word: running, idle, starting, stopping, stopped, … */
+  state: string;
+  /** size: small, default, large, xlarge */
+  type: string | null;
+  vcpu: number | null;
+  memoryGB: number | null;
+  createdAt: string | null;
+}
+
 export interface Commands {
   get_state: [undefined, UiState];
+  other_sandboxes: [undefined, BoatSandbox[]];
+  set_sandbox_running: [{ id: string; running: boolean }, void]; // resolves once Boat has done it
   create_machine: [{ name: string; size: string; projects?: string[] }, void]; // projects: LocalProject ids to add once up
   local_projects: [undefined, LocalProject[]]; // pinned first, then most recent
   add_project: [{ id: string; projectId: string }, void]; // resolves once cloned

@@ -3,6 +3,7 @@ import { call, errorText, useUiState } from "./api";
 import type { LocalProject, McpClient, MachineView, SetupAction, UiState } from "./types";
 import { machineKey, type Action } from "./machine";
 import { Ocean, type OceanBoat } from "./components/Ocean";
+import { OtherSandboxes } from "./components/OtherSandboxes";
 import { MachineRow } from "./components/MachineRow";
 import { NewMachine } from "./components/NewMachine";
 import { SettingsView } from "./components/SettingsView";
@@ -270,6 +271,7 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
               </ul>
             </>
           )}
+          <OtherSandboxes onError={(text) => toast(text)} />
         </div>
       )}
 

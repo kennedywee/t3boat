@@ -461,3 +461,26 @@ async function loop() {
   setTimeout(loop, TICK_MS);
 }
 loop();
+
+// Boat's free trial runs every sandbox with an auto-stop of at most 2 hours (t3boat asks for
+// none; see `boat.rs`). This watchdog decides when the machine sleeps, so while it is up the
+// deadline is kept that far ahead: a long agent run is not cut off. With no deadline (a paid
+// plan) there is nothing to do.
+const TRIAL_TTL_SECS = 7200;
+const RENEW_EVERY_MS = 10 * 60_000;
+async function renewDeadline() {
+  if (phase === "stopping") return;
+  const out = await boat(["info", "self"], 20_000);
+  const line = out.trim().split("\n").reverse().find((l) => l.startsWith("{"));
+  const sandbox = JSON.parse(line ?? "{}").sandbox ?? {};
+  // Only the trial's own shape: a deadline from a TTL of at most 2 hours. A machine on a plan
+  // runs without one, and this must never add one there.
+  const ttl = sandbox.ttlSeconds;
+  if (!sandbox.archiveAfter || typeof ttl !== "number" || ttl > TRIAL_TTL_SECS) return;
+  await boat(["extend", "self", "--ttl", String(TRIAL_TTL_SECS)], 20_000);
+}
+async function renewLoop() {
+  await renewDeadline().catch((e) => log("renewing the trial's auto-stop failed", e.message));
+  setTimeout(renewLoop, RENEW_EVERY_MS);
+}
+renewLoop();

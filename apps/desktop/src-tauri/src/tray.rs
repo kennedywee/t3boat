@@ -414,6 +414,18 @@ async fn add_project(ui: State<'_, Ui>, id: String, project_id: String) -> Res {
     app.add_project(&machine, &project_id).await.map(drop).map_err(err)
 }
 
+/// The Boat account's sandboxes that t3boat did not create.
+#[tauri::command]
+async fn other_sandboxes(ui: State<'_, Ui>) -> Res<Vec<crate::boat::SandboxSummary>> {
+    ui.app()?.other_sandboxes().await.map_err(err)
+}
+
+/// Starts (`running`) or stops one of `other_sandboxes`.
+#[tauri::command]
+async fn set_sandbox_running(ui: State<'_, Ui>, id: String, running: bool) -> Res {
+    ui.app()?.set_other_sandbox_running(&id, running).await.map_err(err)
+}
+
 #[tauri::command]
 async fn wake_machine(ui: State<'_, Ui>, id: String) -> Res {
     ui.app()?.machine(&id).map_err(err)?.ensure_awake().await.map_err(err)
@@ -583,6 +595,8 @@ pub fn run() {
             create_machine,
             local_projects,
             add_project,
+            other_sandboxes,
+            set_sandbox_running,
             wake_machine,
             sleep_machine,
             open_machine,

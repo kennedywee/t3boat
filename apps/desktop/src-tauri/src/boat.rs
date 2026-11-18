@@ -1,7 +1,7 @@
 //! Thin wrapper over the user's own Boat CLI. Uses its existing login; never stores Boat credentials.
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -18,6 +18,24 @@ pub struct Sandbox {
     pub id: String,
     pub state: String,
     pub stopped_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A sandbox as `boat list` describes it, for sandboxes t3boat shows but does not manage.
+/// Field names match Boat's JSON and the UI's `BoatSandbox`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SandboxSummary {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub state: String,
+    #[serde(rename = "type", default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub vcpu: Option<u32>,
+    #[serde(rename = "memoryGB", default)]
+    pub memory_gb: Option<f64>,
+    #[serde(rename = "createdAt", default)]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -51,6 +69,11 @@ pub struct SignIn {
     pub url: String,
     pub code: Option<String>,
 }
+
+/// Boat's answer when a free trial asks for a sandbox without auto-stop.
+const TRIAL_REFUSAL: &str = "trial_auto_stop_required";
+/// The longest auto-stop Boat's free trial allows (2 hours); `watchdog.mjs` renews it.
+const TRIAL_TTL_SECS: &str = "7200";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resume {
@@ -123,10 +146,27 @@ impl Boat {
     }
 
     /// Returns the new sandbox's id. `snapshot`: the saved snapshot its disk starts from.
+    /// Runs `args` without Boat's auto-stop, as machines run: the watchdog decides when they
+    /// sleep. Boat's free trial refuses that, so there it runs them with the longest auto-stop
+    /// the trial allows; the watchdog keeps pushing that deadline while the machine is up.
+    /// Asked of Boat every time, so a trial upgraded to a plan needs nothing more.
+    async fn output_without_auto_stop(&self, args: &[&str], timeout: Duration) -> Result<(bool, String, String)> {
+        let out = self.output(&[args, &["--no-auto-stop"]].concat(), timeout).await?;
+        if out.0 || !said(&out.1, &out.2).contains(TRIAL_REFUSAL) {
+            return Ok(out);
+        }
+        tracing::info!("Boat trial: boat {} with a {TRIAL_TTL_SECS} s auto-stop", args[0]);
+        self.output(&[args, &["--ttl", TRIAL_TTL_SECS]].concat(), timeout).await
+    }
+
     pub async fn create(&self, name: &str, size: &str, snapshot: Option<&str>) -> Result<String> {
-        let mut args = vec!["new", "--name", name, "--type", size, "--no-auto-stop"];
+        let mut args = vec!["new", "--name", name, "--type", size];
         args.extend(snapshot.into_iter().flat_map(|s| ["--from", s]));
-        let out = self.run(&args, Duration::from_secs(300)).await?;
+        let (ok, stdout, stderr) = self.output_without_auto_stop(&args, Duration::from_secs(300)).await?;
+        if !ok {
+            bail!("boat new failed: {}", said(&stdout, &stderr));
+        }
+        let out = stdout;
         let v = Self::last_json(&out)?;
         let id = v["id"].as_str().ok_or_else(|| anyhow!("boat new returned no id"))?;
         Ok(id.to_owned())
@@ -142,6 +182,23 @@ impl Boat {
         Ok(serde_json::from_value(v["sandboxes"].clone())?)
     }
 
+    /// Every sandbox on the account, with what the UI shows for one t3boat does not manage.
+    pub async fn summaries(&self) -> Result<Vec<SandboxSummary>> {
+        let v = Self::last_json(&self.run(&["list", "--all"], Duration::from_secs(20)).await?)?;
+        Ok(serde_json::from_value(v["sandboxes"].clone())?)
+    }
+
+    /// Starts a stopped sandbox with Boat's own auto-stop, as `boat resume` does by default.
+    /// Not for machines: they resume through `resume`, onto their size and without auto-stop.
+    pub async fn start(&self, id: &str) -> Result<()> {
+        self.run(&["resume", id], Duration::from_secs(300)).await.map(drop)
+    }
+
+    /// Stops a sandbox; its disk stays, as for a sleeping machine.
+    pub async fn stop(&self, id: &str) -> Result<()> {
+        self.run(&["stop", id], Duration::from_secs(120)).await.map(drop)
+    }
+
     /// Gone only when Boat's own list confirms it: one bad answer must not retire a machine.
     pub async fn confirmed_gone(&self, id: &str) -> bool {
         matches!(self.list().await, Ok(l) if l.iter().all(|s| s.id != id))
@@ -150,7 +207,7 @@ impl Boat {
     /// Resumes onto `size`, which is how a machine changes size.
     pub async fn resume(&self, id: &str, size: &str) -> Result<Resume> {
         let (ok, stdout, stderr) =
-            self.output(&["resume", id, "--no-auto-stop", "--type", size], Duration::from_secs(300)).await?;
+            self.output_without_auto_stop(&["resume", id, "--type", size], Duration::from_secs(300)).await?;
         let said = said(&stdout, &stderr);
         match ok {
             true => Ok(Resume::Resumed),

@@ -242,6 +242,28 @@ impl App {
         self.machines.read().unwrap().iter().map(|r| r.machine.clone()).collect()
     }
 
+    /// Whether a Boat sandbox belongs to t3boat: a machine's, one being created, or one left from
+    /// a create that did not finish.
+    fn owns_sandbox(&self, id: &str) -> bool {
+        self.machines().iter().any(|m| m.sandbox_id() == id)
+            || self.creating.lock().unwrap().iter().any(|c| c.sandbox.as_deref() == Some(id))
+            || self.leftover_sandboxes.lock().unwrap().iter().any(|s| s == id)
+    }
+
+    /// The account's other sandboxes: made with the Boat CLI or its website, not by t3boat.
+    pub async fn other_sandboxes(&self) -> Result<Vec<crate::boat::SandboxSummary>> {
+        let mut all = self.shared.boat.summaries().await?;
+        all.retain(|s| !self.owns_sandbox(&s.id));
+        Ok(all)
+    }
+
+    /// Starts or stops one of `other_sandboxes`; never a machine, which wakes and sleeps itself.
+    pub async fn set_other_sandbox_running(&self, id: &str, running: bool) -> Result<()> {
+        anyhow::ensure!(!self.owns_sandbox(id), "{id} is a t3boat machine: wake or sleep it instead");
+        let boat = &self.shared.boat;
+        if running { boat.start(id).await } else { boat.stop(id).await }
+    }
+
     /// By id, or by name ignoring case.
     pub fn machine(&self, machine: &str) -> Result<Arc<MachineRuntime>> {
         self.machines()
