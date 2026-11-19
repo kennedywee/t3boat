@@ -4,7 +4,7 @@
 use crate::boat::{Boat, Starts};
 use crate::machine::{provision, Event, MachineRuntime, Power, Shared, WatchdogPhase};
 use crate::proxy;
-use crate::store::{Settings, Spend, State, Store};
+use crate::store::{GithubUploads, Settings, Spend, State, Store};
 use crate::t3desktop::T3Desktop;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
@@ -163,6 +163,7 @@ impl App {
             boat,
             t3: t3.with_token_file(data_dir.join("t3-token")),
             settings: RwLock::new(state.settings.clone()),
+            github_uploads: RwLock::new(state.github_uploads.clone()),
             events,
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
@@ -287,6 +288,7 @@ impl App {
         let state = State {
             machines: self.machines().iter().map(|m| m.record()).collect(),
             settings: self.settings(),
+            github_uploads: self.shared.github_uploads.read().unwrap().clone(),
             spend,
             retired_ports,
             pending_sandboxes,
@@ -299,6 +301,29 @@ impl App {
     pub fn update_settings(&self, settings: Settings) {
         *self.shared.settings.write().unwrap() = settings;
         self.shared.persist();
+    }
+
+    /// The GitHub login connected for uploads: `None` when not connected, else its login name if known.
+    pub fn github_uploads(&self) -> Option<Option<String>> {
+        self.shared.github_uploads.read().unwrap().as_ref().map(|g| g.login.clone())
+    }
+
+    /// The user signs in to GitHub in the browser; `on_code` gets the code its page asks for.
+    pub async fn connect_github_uploads(self: &Arc<Self>, on_code: impl FnOnce(&str)) -> Result<()> {
+        let scratch = self.data_dir.join(format!("gh-sign-in-{}", crate::proxy::auth::random_token()));
+        let uploads = crate::github::sign_in(&scratch, on_code).await?;
+        self.set_github_uploads(Some(uploads));
+        Ok(())
+    }
+
+    /// Connects or (`None`) disconnects the GitHub login machines upload with. Machines that are
+    /// up and idle get the change now, the others as they next wake.
+    pub fn set_github_uploads(self: &Arc<Self>, uploads: Option<GithubUploads>) {
+        *self.shared.github_uploads.write().unwrap() = uploads;
+        self.shared.persist();
+        for machine in self.machines() {
+            tokio::spawn(async move { machine.apply_settings().await });
+        }
     }
 
     /// Claims the name and a local port for a new machine, so concurrent creates never share
@@ -354,7 +379,7 @@ impl App {
                 size,
                 &version,
                 port,
-                self.settings().fleet_repo.as_deref(),
+                &self.shared.extras(),
                 |sandbox| self.set_creating_sandbox(name, sandbox),
                 |step| self.set_creating_step(name, step),
             )

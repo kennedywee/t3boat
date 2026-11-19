@@ -15,7 +15,7 @@ use crate::proxy::cache::{self, Cache};
 use crate::proxy::classify;
 use crate::proxy::threads;
 use crate::proxy::upstream;
-use crate::store::{Machine, Settings};
+use crate::store::{GithubUploads, Machine, Settings};
 use crate::t3desktop::T3Desktop;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -130,11 +130,20 @@ pub struct Shared {
     pub boat: Boat,
     pub t3: T3Desktop,
     pub settings: RwLock<Settings>,
+    /// The user's own GitHub login for uploads, when connected.
+    pub github_uploads: RwLock<Option<GithubUploads>>,
     pub events: mpsc::UnboundedSender<Event>,
     pub http: reqwest::Client,
 }
 
 impl Shared {
+    /// What the settings put on every machine, as of now.
+    pub fn extras(&self) -> provision::Extras {
+        provision::Extras {
+            fleet: self.settings.read().unwrap().fleet_repo.clone(),
+            gh_upload_token: self.github_uploads.read().unwrap().as_ref().map(|g| g.token.clone()),
+        }
+    }
     pub fn changed(&self) {
         let _ = self.events.send(Event::Changed);
     }
@@ -537,16 +546,26 @@ impl MachineRuntime {
         Ok(())
     }
 
-    /// The fleet repo machines clone, from the app's settings.
-    fn fleet_repo(&self) -> Option<String> {
-        self.shared.settings.read().unwrap().fleet_repo.clone()
+    /// Brings a changed setting to the machine now if it is up and idle; otherwise its next wake
+    /// does. Never wakes it, and never mid-turn: an upgrade may restart T3.
+    pub async fn apply_settings(&self) {
+        if self.power() != Power::Running || self.record().provision_revision == provision::revision(&self.shared.extras()) {
+            return;
+        }
+        if !self.watchdog_get("/status?fresh").await.is_ok_and(|s| !s.busy) {
+            return;
+        }
+        if let Err(e) = self.kept_awake(self.upgrade_if_needed()).await {
+            tracing::warn!("applying settings to {}: {e:#}", self.id());
+        }
     }
 
-    /// Keeps the machine on the desktop app's T3 version, this app's scripts and the fleet setting.
+    /// Keeps the machine on the desktop app's T3 version, this app's scripts and what the settings
+    /// put on machines (the fleet repo, the GitHub uploads token).
     pub async fn upgrade_if_needed(&self) -> Result<()> {
         let desktop = self.shared.t3.version().await?;
-        let fleet = self.fleet_repo();
-        let revision = provision::revision(fleet.as_deref());
+        let extras = self.shared.extras();
+        let revision = provision::revision(&extras);
         let record = self.record();
         let new_server = desktop != record.t3_version;
         if !new_server && revision == record.provision_revision {
@@ -561,7 +580,7 @@ impl MachineRuntime {
             &record.watchdog_secret,
             &provision::snapshot_name(&record.name, &record.id),
             false,
-            fleet.as_deref(),
+            &extras,
         )
         .await?;
         self.update_record(|m| {
@@ -715,7 +734,7 @@ impl MachineRuntime {
         self.ensure_awake().await?;
         // Older scripts lack keep-awake: take this app's now, which restarts T3, so never
         // mid-turn. Ending a hold works with any watchdog that has one.
-        if minutes != Some(0) && self.record().provision_revision != provision::revision(self.fleet_repo().as_deref()) {
+        if minutes != Some(0) && self.record().provision_revision != provision::revision(&self.shared.extras()) {
             if self.watchdog_get("/status?fresh").await?.busy {
                 bail!("needs a quick update first; try again once its agents finish");
             }

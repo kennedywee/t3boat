@@ -61,6 +61,17 @@ pub struct Settings {
     pub fleet_repo: Option<String>,
 }
 
+/// The user's own GitHub login, from "GitHub uploads" in the settings. Machines get the token for
+/// `gh` commands that upload a file, which GitHub refuses the GitHub App token Boat signs them in
+/// with. It acts as the user until they revoke it on GitHub.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubUploads {
+    pub token: String,
+    /// The account's login name, for the settings to show.
+    pub login: Option<String>,
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self { start_at_login: true, fleet_repo: None }
@@ -112,6 +123,7 @@ pub struct Spend {
 pub struct State {
     pub machines: Vec<Machine>,
     pub settings: Settings,
+    pub github_uploads: Option<GithubUploads>,
     /// By sandbox id.
     pub spend: HashMap<String, Spend>,
     /// Local ports of deleted machines, never given out again: T3 Code may still list one (it

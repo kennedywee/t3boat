@@ -36,6 +36,10 @@ struct Ui {
     setup: Mutex<SetupState>,
     account: Mutex<Option<Account>>,
     mcp: Mutex<McpStatus>,
+    /// While a "GitHub uploads" sign-in waits: the code GitHub's page asks for.
+    github_code: Mutex<Option<String>>,
+    /// One GitHub sign-in at a time.
+    github_sign_in: tokio::sync::Mutex<()>,
     /// No tray to open the panel from, so it is an ordinary window: see `follow_tray_host`.
     windowed: AtomicBool,
     /// One `init` at a time: the startup check and "Check again" must not both build an App.
@@ -92,6 +96,18 @@ struct UiState {
     settings: Settings,
     sizes: &'static [SizeInfo],
     mcp: McpStatus,
+    github_uploads: GithubUploadsView,
+}
+
+/// The user's own GitHub login on machines, for `gh` commands that upload a file.
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubUploadsView {
+    connected: bool,
+    /// The account's login name, when known.
+    login: Option<String>,
+    /// While a sign-in waits: the code GitHub's page asks for.
+    code: Option<String>,
 }
 
 impl Ui {
@@ -112,6 +128,14 @@ impl Ui {
             settings: app.as_ref().map(|a| a.settings()).unwrap_or_default(),
             sizes: SIZES,
             mcp: self.mcp.lock().unwrap().clone(),
+            github_uploads: {
+                let uploads = app.as_ref().and_then(|a| a.github_uploads());
+                GithubUploadsView {
+                    connected: uploads.is_some(),
+                    login: uploads.flatten(),
+                    code: self.github_code.lock().unwrap().clone(),
+                }
+            },
         }
     }
 }
@@ -526,6 +550,30 @@ async fn update_settings(handle: AppHandle, ui: State<'_, Ui>, mut settings: Set
     Ok(())
 }
 
+/// "GitHub uploads": the user signs in to GitHub in the browser with their own account, and every
+/// machine gets that login for uploads. Resolves once signed in.
+#[tauri::command]
+async fn connect_github_uploads(handle: AppHandle, ui: State<'_, Ui>) -> Res {
+    let app = ui.app()?;
+    let _one = ui.github_sign_in.try_lock().map_err(|_| "A GitHub sign-in is already waiting in the browser")?;
+    let show_code = |code: Option<&str>| {
+        *handle.state::<Ui>().github_code.lock().unwrap() = code.map(str::to_owned);
+        emit_state(&handle);
+    };
+    let result = app.connect_github_uploads(|code| show_code(Some(code))).await;
+    show_code(None);
+    result.map_err(err)
+}
+
+/// Forgets the login and takes it off the machines. The token itself stays valid on GitHub
+/// until the user revokes it there.
+#[tauri::command]
+async fn disconnect_github_uploads(handle: AppHandle, ui: State<'_, Ui>) -> Res {
+    ui.app()?.set_github_uploads(None);
+    emit_state(&handle);
+    Ok(())
+}
+
 #[tauri::command]
 async fn setup_action(handle: AppHandle, ui: State<'_, Ui>, action: String) -> Res {
     let set_busy = |busy: bool| {
@@ -630,6 +678,8 @@ pub fn run() {
             get_machine_details,
             latest_thread,
             update_settings,
+            connect_github_uploads,
+            disconnect_github_uploads,
             setup_action,
             add_mcp,
             quit_app

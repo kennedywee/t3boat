@@ -13,15 +13,27 @@ const WATCHDOG_MJS: &str = include_str!("watchdog.mjs");
 const T3_PORT: u16 = 3773;
 const WATCHDOG_PORT: u16 = 3774;
 
-/// Identifies the provisioning scripts and the fleet repo; a machine provisioned with others gets
-/// them on wake, so a changed fleet setting reaches every machine.
-pub fn revision(fleet: Option<&str>) -> String {
+/// What the user's settings put on every machine.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Extras {
+    /// The fleet repo (`owner/name`) machines clone and install.
+    pub fleet: Option<String>,
+    /// The user's own GitHub token, which `gh` on a machine uses for uploads only.
+    pub gh_upload_token: Option<String>,
+}
+
+/// Identifies the provisioning scripts and the `extras`; a machine provisioned with others gets
+/// them on wake, so a changed setting reaches every machine.
+pub fn revision(extras: &Extras) -> String {
     let hash = fnv1a(
         PROVISION_SH
             .bytes()
             .chain(WATCHDOG_MJS.bytes())
             .chain(SLEEP_AFTER_SECS.to_string().bytes())
-            .chain(fleet.unwrap_or_default().bytes()),
+            .chain(extras.fleet.as_deref().unwrap_or_default().bytes())
+            // A separator, so no fleet repo reads as a token.
+            .chain([0])
+            .chain(extras.gh_upload_token.as_deref().unwrap_or_default().bytes()),
     );
     format!("{hash:016x}")
 }
@@ -94,13 +106,13 @@ pub async fn run(
     watchdog_secret: &str,
     snapshot: &str,
     mint_upstream_token: bool,
-    fleet: Option<&str>,
+    extras: &Extras,
 ) -> Result<Provisioned> {
     let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
     let script = format!(
         "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
          echo {p} | base64 -d > \"$d/provision.sh\"; echo {w} | base64 -d > \"$d/watchdog.mjs\"\n\
-         T3BOAT_SECRET={s} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet}\n",
+         T3BOAT_SECRET={s} T3BOAT_GH_UPLOAD_TOKEN={gh} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet}\n",
         p = b64(PROVISION_SH),
         w = b64(WATCHDOG_MJS),
         v = shell_word(t3_version)?,
@@ -109,7 +121,9 @@ pub async fn run(
         snapshot = shell_word(snapshot)?,
         mint = u8::from(mint_upstream_token),
         name = shell_word(name)?,
-        fleet = fleet_word(fleet)?,
+        fleet = fleet_word(extras.fleet.as_deref())?,
+        // In the uploaded file, not in the command Boat runs: `boat history` keeps commands.
+        gh = shell_word(extras.gh_upload_token.as_deref().unwrap_or_default())?,
     );
     let name = format!("t3boat-provision-{}.sh", random_token());
     let local = std::env::temp_dir().join(&name);
@@ -130,7 +144,8 @@ pub async fn run(
 /// Only `[A-Za-z0-9._-]` reaches the remote shell.
 fn shell_word(s: &str) -> Result<&str> {
     if !s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
-        bail!("unsafe value for the remote shell: {s}");
+        // Not the value itself: it may be a token.
+        bail!("unsafe value for the remote shell ({} characters)", s.chars().count());
     }
     Ok(s)
 }
@@ -149,7 +164,7 @@ pub async fn create(
     size: &str,
     t3_version: &str,
     local_port: u16,
-    fleet: Option<&str>,
+    extras: &Extras,
     created: impl FnOnce(&str),
     progress: impl Fn(&str),
 ) -> Result<Machine> {
@@ -162,7 +177,7 @@ pub async fn create(
     created(&id);
     progress("Installing T3 Code");
     let secret = random_token();
-    let provisioned = run(boat, &id, name, t3_version, &secret, &snapshot_name(name, &id), true, fleet).await?;
+    let provisioned = run(boat, &id, name, t3_version, &secret, &snapshot_name(name, &id), true, extras).await?;
     progress("Opening the machine's address");
     let (upstream_url, watchdog_url) = host(boat, &id).await?;
     Ok(Machine {
@@ -178,7 +193,7 @@ pub async fn create(
         watchdog_secret: secret,
         local_port,
         t3_version: t3_version.to_owned(),
-        provision_revision: revision(fleet),
+        provision_revision: revision(extras),
         environment_id: provisioned.environment_id,
         client_tokens: Vec::new(),
         link_tokens: Vec::new(),
