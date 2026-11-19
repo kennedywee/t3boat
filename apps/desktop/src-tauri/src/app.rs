@@ -185,6 +185,10 @@ impl App {
         for record in state.machines {
             app.spawn(app.runtime(record));
         }
+        // A setting changed while a machine was busy, or with the app closed.
+        for machine in app.machines() {
+            tokio::spawn(async move { machine.apply_settings().await });
+        }
         tokio::spawn(app.clone().delete_leftover_sandboxes());
         Ok(app)
     }

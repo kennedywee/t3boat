@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 const PROVISION_SH: &str = include_str!("provision.sh");
 const WATCHDOG_MJS: &str = include_str!("watchdog.mjs");
+const GH_UPLOADS_SH: &str = include_str!("gh-uploads.sh");
 const T3_PORT: u16 = 3773;
 const WATCHDOG_PORT: u16 = 3774;
 
@@ -29,6 +30,7 @@ pub fn revision(extras: &Extras) -> String {
         PROVISION_SH
             .bytes()
             .chain(WATCHDOG_MJS.bytes())
+            .chain(GH_UPLOADS_SH.bytes())
             .chain(SLEEP_AFTER_SECS.to_string().bytes())
             .chain(extras.fleet.as_deref().unwrap_or_default().bytes())
             // A separator, so no fleet repo reads as a token.
@@ -112,9 +114,11 @@ pub async fn run(
     let script = format!(
         "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
          echo {p} | base64 -d > \"$d/provision.sh\"; echo {w} | base64 -d > \"$d/watchdog.mjs\"\n\
+         echo {g} | base64 -d > \"$d/gh-uploads.sh\"\n\
          T3BOAT_SECRET={s} T3BOAT_GH_UPLOAD_TOKEN={gh} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet}\n",
         p = b64(PROVISION_SH),
         w = b64(WATCHDOG_MJS),
+        g = b64(GH_UPLOADS_SH),
         v = shell_word(t3_version)?,
         s = shell_word(watchdog_secret)?,
         sleep = SLEEP_AFTER_SECS,
@@ -125,6 +129,18 @@ pub async fn run(
         // In the uploaded file, not in the command Boat runs: `boat history` keeps commands.
         gh = shell_word(extras.gh_upload_token.as_deref().unwrap_or_default())?,
     );
+    let out = run_uploaded(boat, sandbox_id, &script, 600).await?;
+    let line = out
+        .lines()
+        .rev()
+        .find(|l| l.starts_with('{'))
+        .ok_or_else(|| anyhow!("provisioning printed no result"))?;
+    Ok(serde_json::from_str(line)?)
+}
+
+/// Runs `script` on the sandbox from an uploaded file, which the script itself removes: what it
+/// holds (a token) is then never on a command line, and `boat history` keeps those. Returns stdout.
+async fn run_uploaded(boat: &Boat, sandbox_id: &str, script: &str, timeout_secs: u64) -> Result<String> {
     let name = format!("t3boat-provision-{}.sh", random_token());
     let local = std::env::temp_dir().join(&name);
     crate::store::write_private(&local, script.as_bytes())?;
@@ -132,13 +148,20 @@ pub async fn run(
     let uploaded = boat.upload(sandbox_id, &local, &remote).await;
     let _ = std::fs::remove_file(&local);
     uploaded?;
-    let out = boat.exec_ok(sandbox_id, &format!("bash {remote}"), 600).await?;
-    let line = out
-        .lines()
-        .rev()
-        .find(|l| l.starts_with('{'))
-        .ok_or_else(|| anyhow!("provisioning printed no result"))?;
-    Ok(serde_json::from_str(line)?)
+    boat.exec_ok(sandbox_id, &format!("bash {remote}"), timeout_secs).await
+}
+
+/// Brings "GitHub uploads" to a running machine: the newer `gh`, its wrapper and the token, or
+/// the token's removal. Unlike `run` it restarts nothing, so it is safe while agents work.
+pub async fn gh_uploads(boat: &Boat, sandbox_id: &str, extras: &Extras) -> Result<()> {
+    let script = format!(
+        "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
+         echo {g} | base64 -d > \"$d/gh-uploads.sh\"\n\
+         T3BOAT_GH_UPLOAD_TOKEN={gh} bash \"$d/gh-uploads.sh\"\n",
+        g = base64::engine::general_purpose::STANDARD.encode(GH_UPLOADS_SH),
+        gh = shell_word(extras.gh_upload_token.as_deref().unwrap_or_default())?,
+    );
+    run_uploaded(boat, sandbox_id, &script, 400).await.map(drop)
 }
 
 /// Only `[A-Za-z0-9._-]` reaches the remote shell.

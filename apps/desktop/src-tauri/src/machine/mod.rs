@@ -469,6 +469,10 @@ impl MachineRuntime {
             // upgrade drops the snapshot's stale chats.
             if !restored && self.watchdog_get("/status?fresh").await.is_ok_and(|s| s.busy) {
                 tracing::info!("{id} is busy: upgrade deferred to the next wake");
+                // What cannot wait for it and restarts nothing.
+                if let Err(e) = provision::gh_uploads(&self.shared.boat, &self.sandbox_id(), &self.shared.extras()).await {
+                    tracing::warn!("bringing GitHub uploads to {id}: {e:#}");
+                }
             } else if let Err(e) = self.upgrade_if_needed().await {
                 tracing::warn!("upgrading {id}: {e:#}");
             }
@@ -546,11 +550,16 @@ impl MachineRuntime {
         Ok(())
     }
 
-    /// Brings a changed setting to the machine now if it is up and idle; otherwise its next wake
-    /// does. Never wakes it, and never mid-turn: an upgrade may restart T3.
+    /// Brings a changed setting to the machine now if it is up; otherwise its next wake does.
+    /// Never wakes it. "GitHub uploads" goes over even while agents work, as it restarts nothing;
+    /// the rest waits for an idle machine, since an upgrade may restart T3.
     pub async fn apply_settings(&self) {
-        if self.power() != Power::Running || self.record().provision_revision == provision::revision(&self.shared.extras()) {
+        let extras = self.shared.extras();
+        if self.record().provision_revision == provision::revision(&extras) || self.settled_power().await != Power::Running {
             return;
+        }
+        if let Err(e) = self.kept_awake(provision::gh_uploads(&self.shared.boat, &self.sandbox_id(), &extras)).await {
+            tracing::warn!("bringing GitHub uploads to {}: {e:#}", self.id());
         }
         if !self.watchdog_get("/status?fresh").await.is_ok_and(|s| !s.busy) {
             return;
