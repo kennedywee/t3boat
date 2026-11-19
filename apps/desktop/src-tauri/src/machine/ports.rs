@@ -13,8 +13,13 @@ use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
+
+/// More than a WebSocket pong or a TCP keepalive carries, less than any request or message a
+/// person causes.
+const KEEPALIVE_BYTES: usize = 32;
 
 /// Each forward is a `boat forward` process of its own.
 pub const MAX_FORWARDS: usize = 20;
@@ -125,17 +130,24 @@ impl MachineRuntime {
         if let Some(port) = ports.iter().find(|p| **p == 0) {
             bail!("{port} is not a port");
         }
-        let mut wanted = self.record().forwards;
-        for port in ports {
-            if !wanted.contains(port) {
-                wanted.push(*port);
+        self.ensure_awake().await?;
+        // Added to the list as it is now: another change may have run during the wake.
+        let mut fits = true;
+        self.update_record(|m| {
+            let mut wanted = m.forwards.clone();
+            for port in ports {
+                if !wanted.contains(port) {
+                    wanted.push(*port);
+                }
             }
-        }
-        if wanted.len() > MAX_FORWARDS {
+            fits = wanted.len() <= MAX_FORWARDS;
+            if fits {
+                m.forwards = wanted;
+            }
+        });
+        if !fits {
             bail!("a machine forwards at most {MAX_FORWARDS} ports");
         }
-        self.ensure_awake().await?;
-        self.update_record(|m| m.forwards = wanted);
         self.sync_forwards().await;
         let failed: Vec<String> = {
             let errors = self.ports.errors.lock().unwrap();
@@ -248,9 +260,11 @@ impl MachineRuntime {
                     accepted = listener.accept() => {
                         let (Ok((mut client, _)), Some(machine)) = (accepted, machine.upgrade()) else { return };
                         machine.used();
+                        let machine = Arc::downgrade(&machine);
                         relays.spawn(async move {
                             if let Ok(mut remote) = TcpStream::connect(("127.0.0.1", tunnel)).await {
-                                let _ = tokio::io::copy_bidirectional(&mut client, &mut remote).await;
+                                let used = || machine.upgrade().iter().for_each(MachineRuntime::used);
+                                let _ = relay(&mut client, &mut remote, used).await;
                             }
                         });
                     }
@@ -258,6 +272,32 @@ impl MachineRuntime {
             }
         })))
     }
+}
+
+/// Copies both ways until both sides are done or one fails. What the browser sends on an open
+/// connection (a further request, a WebSocket message) is `used`, as the connection itself
+/// was. A keepalive's few bytes are not, so a page left open lets the machine sleep.
+async fn relay(client: &mut TcpStream, remote: &mut TcpStream, used: impl Fn()) -> std::io::Result<()> {
+    let (mut from_client, mut to_client) = client.split();
+    let (mut from_remote, mut to_remote) = remote.split();
+    let sent = async {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            let n = from_client.read(&mut buf).await?;
+            if n == 0 {
+                return to_remote.shutdown().await;
+            }
+            if n > KEEPALIVE_BYTES {
+                used();
+            }
+            to_remote.write_all(&buf[..n]).await?;
+        }
+    };
+    let received = async {
+        tokio::io::copy(&mut from_remote, &mut to_client).await?;
+        to_client.shutdown().await
+    };
+    tokio::try_join!(sent, received).map(drop)
 }
 
 /// From `SCAN`'s output: the ports worth showing (unprivileged, not T3's own, not the image's),
@@ -314,7 +354,44 @@ fn port_of(address: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_scan;
+    use super::{parse_scan, relay};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let near = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        (near, listener.accept().await.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn relay_counts_what_the_browser_sends_but_not_a_keepalive() {
+        let (mut browser, mut client) = pair().await;
+        let (mut remote, mut server) = pair().await;
+        let uses = AtomicU32::new(0);
+        let relayed = relay(&mut client, &mut remote, || drop(uses.fetch_add(1, Ordering::SeqCst)));
+        let talk = async {
+            let mut buf = [0u8; 64];
+            let request = b"GET /members HTTP/1.1\r\nHost: localhost:4001\r\n\r\n";
+            browser.write_all(request).await.unwrap();
+            server.read_exact(&mut buf[..request.len()]).await.unwrap();
+            assert_eq!(uses.load(Ordering::SeqCst), 1);
+            // The server's answer, however long, is not the person's doing.
+            server.write_all(&[b'x'; 64]).await.unwrap();
+            browser.read_exact(&mut buf).await.unwrap();
+            // A WebSocket pong.
+            browser.write_all(&[0x8a, 0x80, 1, 2, 3, 4]).await.unwrap();
+            server.read_exact(&mut buf[..6]).await.unwrap();
+            assert_eq!(uses.load(Ordering::SeqCst), 1);
+            browser.write_all(request).await.unwrap();
+            server.read_exact(&mut buf[..request.len()]).await.unwrap();
+            assert_eq!(uses.load(Ordering::SeqCst), 2);
+            drop((browser, server));
+        };
+        let (result, ()) = tokio::join!(relayed, talk);
+        result.unwrap();
+    }
 
     #[test]
     fn scan_keeps_dev_servers_and_names_containers() {
