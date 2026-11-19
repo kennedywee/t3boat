@@ -45,7 +45,7 @@ const DUE_WAKE_RETRY: Duration = Duration::from_secs(5 * 60);
 /// A running machine's link is checked this often: links can be turned on, fail or near expiry
 /// while it stays up.
 const LINK_CHECK: Duration = Duration::from_secs(10 * 60);
-/// How long a failed "GitHub uploads" change waits for its next try.
+/// How long a failed "GitHub uploads" change waits for its next try, from when it failed.
 const GH_UPLOADS_RETRY: Duration = Duration::from_secs(60);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -173,6 +173,9 @@ pub struct MachineRuntime {
     /// the settings once it holds this, so the last one to run leaves the machine as the settings
     /// are: a disconnect waits for a connect still going over, then undoes it.
     provisioning: tokio::sync::Mutex<()>,
+    /// The "GitHub uploads" try for the machine's loop: for which settings, and when it failed
+    /// (`None` while it runs). The same settings wait for it, then for `GH_UPLOADS_RETRY`.
+    gh_uploads_try: Mutex<Option<(String, Option<Instant>)>>,
     /// One capture at a time: "sleep now" and the background poll can see the same drain.
     capturing: tokio::sync::Mutex<()>,
     last_heartbeat: Mutex<Option<Instant>>,
@@ -201,6 +204,7 @@ impl MachineRuntime {
             watchdog: Mutex::new(None),
             waking: tokio::sync::Mutex::new(()),
             provisioning: tokio::sync::Mutex::new(()),
+            gh_uploads_try: Mutex::new(None),
             capturing: tokio::sync::Mutex::new(()),
             last_heartbeat: Mutex::new(None),
             stop_seen: Mutex::new(None),
@@ -920,8 +924,6 @@ impl MachineRuntime {
         let mut last_keep_alive: Option<Instant> = None;
         let mut last_due_wake: Option<Instant> = None;
         let mut last_link_check: Option<Instant> = None;
-        // The last "GitHub uploads" try: which settings, and when.
-        let mut last_gh_uploads: Option<(String, Instant)> = None;
         let mut watchdog_failures = 0u32;
         let mut was_busy = false;
         let mut was_running = false;
@@ -976,18 +978,34 @@ impl MachineRuntime {
                 }
                 // "GitHub uploads" as the settings have it now: after a connect or disconnect, on a
                 // machine that woke or was created with other settings, and after a failed try.
-                // Only the same settings failing again wait; a newer change or a wake goes at once.
+                // Only the same settings wait, for their try to end and then to be tried again; a
+                // newer change goes at once, and so does a wake.
                 let gh_uploads = provision::gh_uploads_revision(&self.shared.extras());
-                if came_up {
-                    last_gh_uploads = None;
-                }
-                let tried = last_gh_uploads.as_ref().is_some_and(|(r, t)| *r == gh_uploads && t.elapsed() < GH_UPLOADS_RETRY);
-                if self.record().gh_uploads_revision.as_deref() != Some(&gh_uploads) && !tried {
-                    last_gh_uploads = Some((gh_uploads, Instant::now()));
+                let start = {
+                    let mut last = self.gh_uploads_try.lock().unwrap();
+                    if came_up && last.as_ref().is_some_and(|(_, failed)| failed.is_some()) {
+                        *last = None;
+                    }
+                    let waits = last.as_ref().is_some_and(|(revision, failed)| {
+                        *revision == gh_uploads && failed.is_none_or(|at| at.elapsed() < GH_UPLOADS_RETRY)
+                    });
+                    let start = !waits && self.record().gh_uploads_revision.as_deref() != Some(&gh_uploads);
+                    if start {
+                        *last = Some((gh_uploads.clone(), None));
+                    }
+                    start
+                };
+                if start {
                     let this = self.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = this.bring_gh_uploads().await {
+                        let result = this.bring_gh_uploads().await;
+                        if let Err(e) = &result {
                             tracing::warn!("bringing GitHub uploads to {}: {e:#}", this.id());
+                        }
+                        let mut last = this.gh_uploads_try.lock().unwrap();
+                        // A newer change's try has taken the slot meanwhile: it is not this one's.
+                        if last.as_ref().is_some_and(|(revision, _)| *revision == gh_uploads) {
+                            *last = result.is_err().then(|| (gh_uploads, Some(Instant::now())));
                         }
                     });
                 }
