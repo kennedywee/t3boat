@@ -45,6 +45,8 @@ const DUE_WAKE_RETRY: Duration = Duration::from_secs(5 * 60);
 /// A running machine's link is checked this often: links can be turned on, fail or near expiry
 /// while it stays up.
 const LINK_CHECK: Duration = Duration::from_secs(10 * 60);
+/// How long a failed "GitHub uploads" change waits for its next try.
+const GH_UPLOADS_RETRY: Duration = Duration::from_secs(60);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Power {
@@ -474,10 +476,6 @@ impl MachineRuntime {
             // upgrade drops the snapshot's stale chats.
             if !restored && self.watchdog_get("/status?fresh").await.is_ok_and(|s| s.busy) {
                 tracing::info!("{id} is busy: upgrade deferred to the next wake");
-                // What cannot wait for it and restarts nothing.
-                if let Err(e) = self.bring_gh_uploads().await {
-                    tracing::warn!("bringing GitHub uploads to {id}: {e:#}");
-                }
             } else if let Err(e) = self.upgrade_if_needed().await {
                 tracing::warn!("upgrading {id}: {e:#}");
             }
@@ -555,30 +553,16 @@ impl MachineRuntime {
         Ok(())
     }
 
-    /// Brings a changed setting to the machine now if it is up; otherwise its next wake does.
-    /// Never wakes it. "GitHub uploads" goes over even while agents work, as it restarts nothing;
-    /// the rest waits for an idle machine, since an upgrade may restart T3.
-    pub async fn apply_settings(&self) {
-        if self.settled_power().await != Power::Running {
-            return;
-        }
-        if let Err(e) = self.kept_awake(self.bring_gh_uploads()).await {
-            tracing::warn!("bringing GitHub uploads to {}: {e:#}", self.id());
-        }
-        if self.record().provision_revision == provision::revision(&self.shared.extras())
-            || !self.watchdog_get("/status?fresh").await.is_ok_and(|s| !s.busy)
-        {
-            return;
-        }
-        if let Err(e) = self.kept_awake(self.upgrade_if_needed()).await {
-            tracing::warn!("applying settings to {}: {e:#}", self.id());
-        }
-    }
-
     /// Leaves the running machine with the "GitHub uploads" token of the settings, or without one.
-    /// Restarts nothing, so it is safe while agents work. Compared with what the machine was last
-    /// given, not with `provision_revision`: that one stays as it is until the machine is idle.
+    /// Restarts nothing, so it is safe while agents work. The machine's loop calls this whenever
+    /// what the machine was last given differs from the settings, and again after a failure.
     async fn bring_gh_uploads(&self) -> Result<()> {
+        let (boat, id) = (&self.shared.boat, self.sandbox_id());
+        // The package install first and outside the lock: it can take minutes, and a disconnect
+        // must not wait behind it. It holds no token; whether it worked, the next part tells.
+        if self.shared.extras().gh_upload_token.is_some() {
+            let _ = provision::gh_uploads(boat, &id, "upgrade", &provision::Extras::default()).await;
+        }
         let _one = self.provisioning.lock().await;
         // Read under the lock: the settings as they are now, not as when this was asked for.
         let extras = self.shared.extras();
@@ -588,7 +572,7 @@ impl MachineRuntime {
         }
         // Unknown until it has run through: one that fails part way may have changed the token.
         self.update_record(|m| m.gh_uploads_revision = None);
-        provision::gh_uploads(&self.shared.boat, &self.sandbox_id(), &extras).await?;
+        provision::gh_uploads(boat, &id, "apply", &extras).await?;
         self.update_record(|m| m.gh_uploads_revision = Some(revision));
         Ok(())
     }
@@ -606,8 +590,9 @@ impl MachineRuntime {
             return Ok(());
         }
         tracing::info!("upgrading {} (T3 {desktop}, scripts {revision})", self.id());
-        // Provisioning changes the "GitHub uploads" token and may fail at a later step: until it
-        // has run through, what the machine holds is unknown, so the next change goes over again.
+        // Provisioning changes the "GitHub uploads" setup too, may fail at a later step and does
+        // not say whether that part worked: what the machine holds is unknown from here, and the
+        // machine's loop brings it over again by itself, which does say.
         self.update_record(|m| m.gh_uploads_revision = None);
         provision::run(
             &self.shared.boat,
@@ -620,11 +605,9 @@ impl MachineRuntime {
             &extras,
         )
         .await?;
-        let gh_uploads = provision::gh_uploads_revision(&extras);
         self.update_record(|m| {
             m.t3_version = desktop;
             m.provision_revision = revision;
-            m.gh_uploads_revision = Some(gh_uploads);
         });
         {
             let mut cache = self.cache.lock().unwrap();
@@ -937,6 +920,8 @@ impl MachineRuntime {
         let mut last_keep_alive: Option<Instant> = None;
         let mut last_due_wake: Option<Instant> = None;
         let mut last_link_check: Option<Instant> = None;
+        // The last "GitHub uploads" try: which settings, and when.
+        let mut last_gh_uploads: Option<(String, Instant)> = None;
         let mut watchdog_failures = 0u32;
         let mut was_busy = false;
         let mut was_running = false;
@@ -986,6 +971,23 @@ impl MachineRuntime {
                         if came_up {
                             this.refresh_projects().await;
                             this.refresh_connect().await;
+                        }
+                    });
+                }
+                // "GitHub uploads" as the settings have it now: after a connect or disconnect, on a
+                // machine that woke or was created with other settings, and after a failed try.
+                // Only the same settings failing again wait; a newer change or a wake goes at once.
+                let gh_uploads = provision::gh_uploads_revision(&self.shared.extras());
+                if came_up {
+                    last_gh_uploads = None;
+                }
+                let tried = last_gh_uploads.as_ref().is_some_and(|(r, t)| *r == gh_uploads && t.elapsed() < GH_UPLOADS_RETRY);
+                if self.record().gh_uploads_revision.as_deref() != Some(&gh_uploads) && !tried {
+                    last_gh_uploads = Some((gh_uploads, Instant::now()));
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = this.bring_gh_uploads().await {
+                            tracing::warn!("bringing GitHub uploads to {}: {e:#}", this.id());
                         }
                     });
                 }

@@ -56,7 +56,8 @@ if ! git config --global user.email >/dev/null 2>&1; then
 fi
 
 # GitHub uploads: a newer `gh`, and the user's own login for the commands that upload a file.
-bash "$here/gh-uploads.sh"
+# t3boat runs it again by itself and retries it there: a failure here must not fail the machine.
+bash "$here/gh-uploads.sh" || echo "GitHub uploads not set up yet" >&2
 unset T3BOAT_GH_UPLOAD_TOKEN
 
 "$t3" service install --allow-downgrade >/dev/null

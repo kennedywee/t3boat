@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 # Runs on a Boat sandbox, as `user`: by provision.sh, and by itself when "GitHub uploads" changes
 # in t3boat's settings, since it touches nothing T3 or an agent's turn depends on. Idempotent.
-#   [T3BOAT_GH_UPLOAD_TOKEN=<token>] gh-uploads.sh
+#   [T3BOAT_GH_UPLOAD_TOKEN=<token>] gh-uploads.sh [all|upgrade|apply]
+# `upgrade` is the slow part alone (apt) and `apply` the rest (the wrapper and the token): t3boat
+# runs them apart, so a disconnect never waits for a package install.
 set -euo pipefail
+mode="${1:-all}"
 boat_dir="$HOME/.t3boat"
 mkdir -p "$boat_dir"
 chmod 700 "$boat_dir"
+
+# A disconnect takes the token off before anything below can fail, and with it what a connect that
+# failed half way left behind.
+if [ "$mode" != upgrade ]; then
+  rm -f "$boat_dir/gh-upload-token.new"
+  [ -n "${T3BOAT_GH_UPLOAD_TOKEN:-}" ] || rm -f "$boat_dir/gh-upload-token"
+fi
 
 # GitHub uploads. Boat signs `gh` in with its GitHub App's token, which GitHub's upload server
 # turns away, so `gh pr edit --attach shot.png` fails. With "GitHub uploads" connected in t3boat's
@@ -14,7 +24,7 @@ chmod 700 "$boat_dir"
 # First the newest `gh` from GitHub's apt repo, which Boat's image already has: the image's own
 # predates `--attach`. Only that repo is refreshed. A failed upgrade costs uploads, not the machine.
 gh_list=/etc/apt/sources.list.d/github-cli.list
-if [ -f "$gh_list" ]; then
+if [ "$mode" != apply ] && [ -f "$gh_list" ]; then
   if ! { sudo timeout 120 apt-get update -qq -o Dir::Etc::sourcelist="$gh_list" -o Dir::Etc::sourceparts=- \
       -o APT::Get::List-Cleanup=0 -o DPkg::Lock::Timeout=60 &&
     sudo DEBIAN_FRONTEND=noninteractive timeout 180 apt-get install -y -qq --only-upgrade \
@@ -22,6 +32,7 @@ if [ -f "$gh_list" ]; then
     echo "gh upgrade failed: see ~/.t3boat/gh-upgrade.log" >&2
   fi
 fi
+[ "$mode" != upgrade ] || exit 0
 # This runs while agents work, so each file is written whole under another name and renamed into
 # place: a `gh` started meanwhile reads the old file or the new one, never half of one.
 mkdir -p "$HOME/.local/bin"
@@ -80,6 +91,9 @@ mv -f "$HOME/.local/bin/gh.t3boat-new" "$HOME/.local/bin/gh"
 if [ -n "${T3BOAT_GH_UPLOAD_TOKEN:-}" ]; then
   (umask 077 && printf '%s' "$T3BOAT_GH_UPLOAD_TOKEN" >"$boat_dir/gh-upload-token.new")
   mv -f "$boat_dir/gh-upload-token.new" "$boat_dir/gh-upload-token"
-else
-  rm -f "$boat_dir/gh-upload-token"
+  # Connected, yet this gh cannot upload (the upgrade above failed): t3boat tries again.
+  if ! /usr/bin/gh pr edit --help 2>/dev/null | grep -q -- --attach; then
+    echo "gh on this machine has no --attach yet" >&2
+    exit 3
+  fi
 fi

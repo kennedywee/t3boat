@@ -185,10 +185,6 @@ impl App {
         for record in state.machines {
             app.spawn(app.runtime(record));
         }
-        // A setting changed while a machine was busy, or with the app closed.
-        for machine in app.machines() {
-            tokio::spawn(async move { machine.apply_settings().await });
-        }
         tokio::spawn(app.clone().delete_leftover_sandboxes());
         Ok(app)
     }
@@ -320,14 +316,11 @@ impl App {
         Ok(())
     }
 
-    /// Connects or (`None`) disconnects the GitHub login machines upload with. Machines that are
-    /// up and idle get the change now, the others as they next wake.
-    pub fn set_github_uploads(self: &Arc<Self>, uploads: Option<GithubUploads>) {
+    /// Connects or (`None`) disconnects the GitHub login machines upload with. Each machine's
+    /// loop brings the change over: within seconds where it runs, else as it next wakes.
+    pub fn set_github_uploads(&self, uploads: Option<GithubUploads>) {
         *self.shared.github_uploads.write().unwrap() = uploads;
         self.shared.persist();
-        for machine in self.machines() {
-            tokio::spawn(async move { machine.apply_settings().await });
-        }
     }
 
     /// Claims the name and a local port for a new machine, so concurrent creates never share
