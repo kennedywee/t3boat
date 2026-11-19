@@ -40,6 +40,14 @@ pub fn revision(extras: &Extras) -> String {
     format!("{hash:016x}")
 }
 
+/// Identifies the "GitHub uploads" setup `gh-uploads.sh` leaves on a machine: its script and the
+/// token, or that there is none. Kept per machine, apart from `revision`, because this part also
+/// goes to a machine whose agents are working, where the rest of an upgrade has to wait.
+pub fn gh_uploads_revision(extras: &Extras) -> String {
+    let token = extras.gh_upload_token.as_deref().unwrap_or_default();
+    format!("{:016x}", fnv1a(GH_UPLOADS_SH.bytes().chain([0]).chain(token.bytes())))
+}
+
 /// The fleet repo as `provision.sh` takes it: `owner/name`, or `-` for none.
 fn fleet_word(fleet: Option<&str>) -> Result<&str> {
     match fleet {
@@ -217,6 +225,7 @@ pub async fn create(
         local_port,
         t3_version: t3_version.to_owned(),
         provision_revision: revision(extras),
+        gh_uploads_revision: Some(gh_uploads_revision(extras)),
         environment_id: provisioned.environment_id,
         client_tokens: Vec::new(),
         link_tokens: Vec::new(),

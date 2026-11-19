@@ -167,6 +167,10 @@ pub struct MachineRuntime {
     watchdog: Mutex<Option<WatchdogStatus>>,
     /// One wake at a time; a delete takes it too, so no restore swaps the sandbox under it.
     pub(crate) waking: tokio::sync::Mutex<()>,
+    /// One change to what the machine runs at a time (an upgrade, "GitHub uploads"). Each reads
+    /// the settings once it holds this, so the last one to run leaves the machine as the settings
+    /// are: a disconnect waits for a connect still going over, then undoes it.
+    provisioning: tokio::sync::Mutex<()>,
     /// One capture at a time: "sleep now" and the background poll can see the same drain.
     capturing: tokio::sync::Mutex<()>,
     last_heartbeat: Mutex<Option<Instant>>,
@@ -194,6 +198,7 @@ impl MachineRuntime {
             stopped_at: Mutex::new(None),
             watchdog: Mutex::new(None),
             waking: tokio::sync::Mutex::new(()),
+            provisioning: tokio::sync::Mutex::new(()),
             capturing: tokio::sync::Mutex::new(()),
             last_heartbeat: Mutex::new(None),
             stop_seen: Mutex::new(None),
@@ -470,7 +475,7 @@ impl MachineRuntime {
             if !restored && self.watchdog_get("/status?fresh").await.is_ok_and(|s| s.busy) {
                 tracing::info!("{id} is busy: upgrade deferred to the next wake");
                 // What cannot wait for it and restarts nothing.
-                if let Err(e) = provision::gh_uploads(&self.shared.boat, &self.sandbox_id(), &self.shared.extras()).await {
+                if let Err(e) = self.bring_gh_uploads().await {
                     tracing::warn!("bringing GitHub uploads to {id}: {e:#}");
                 }
             } else if let Err(e) = self.upgrade_if_needed().await {
@@ -554,14 +559,15 @@ impl MachineRuntime {
     /// Never wakes it. "GitHub uploads" goes over even while agents work, as it restarts nothing;
     /// the rest waits for an idle machine, since an upgrade may restart T3.
     pub async fn apply_settings(&self) {
-        let extras = self.shared.extras();
-        if self.record().provision_revision == provision::revision(&extras) || self.settled_power().await != Power::Running {
+        if self.settled_power().await != Power::Running {
             return;
         }
-        if let Err(e) = self.kept_awake(provision::gh_uploads(&self.shared.boat, &self.sandbox_id(), &extras)).await {
+        if let Err(e) = self.kept_awake(self.bring_gh_uploads()).await {
             tracing::warn!("bringing GitHub uploads to {}: {e:#}", self.id());
         }
-        if !self.watchdog_get("/status?fresh").await.is_ok_and(|s| !s.busy) {
+        if self.record().provision_revision == provision::revision(&self.shared.extras())
+            || !self.watchdog_get("/status?fresh").await.is_ok_and(|s| !s.busy)
+        {
             return;
         }
         if let Err(e) = self.kept_awake(self.upgrade_if_needed()).await {
@@ -569,9 +575,26 @@ impl MachineRuntime {
         }
     }
 
+    /// Leaves the running machine with the "GitHub uploads" token of the settings, or without one.
+    /// Restarts nothing, so it is safe while agents work. Compared with what the machine was last
+    /// given, not with `provision_revision`: that one stays as it is until the machine is idle.
+    async fn bring_gh_uploads(&self) -> Result<()> {
+        let _one = self.provisioning.lock().await;
+        // Read under the lock: the settings as they are now, not as when this was asked for.
+        let extras = self.shared.extras();
+        let revision = provision::gh_uploads_revision(&extras);
+        if self.record().gh_uploads_revision.as_deref() == Some(&revision) {
+            return Ok(());
+        }
+        provision::gh_uploads(&self.shared.boat, &self.sandbox_id(), &extras).await?;
+        self.update_record(|m| m.gh_uploads_revision = Some(revision));
+        Ok(())
+    }
+
     /// Keeps the machine on the desktop app's T3 version, this app's scripts and what the settings
     /// put on machines (the fleet repo, the GitHub uploads token).
     pub async fn upgrade_if_needed(&self) -> Result<()> {
+        let _one = self.provisioning.lock().await;
         let desktop = self.shared.t3.version().await?;
         let extras = self.shared.extras();
         let revision = provision::revision(&extras);
@@ -592,9 +615,11 @@ impl MachineRuntime {
             &extras,
         )
         .await?;
+        let gh_uploads = provision::gh_uploads_revision(&extras);
         self.update_record(|m| {
             m.t3_version = desktop;
             m.provision_revision = revision;
+            m.gh_uploads_revision = Some(gh_uploads);
         });
         {
             let mut cache = self.cache.lock().unwrap();

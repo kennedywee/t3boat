@@ -28,6 +28,10 @@ pub struct Machine {
     pub t3_version: String,
     /// `provision::revision()` of the scripts the machine runs.
     pub provision_revision: String,
+    /// `provision::gh_uploads_revision()` of the "GitHub uploads" setup the machine has: which
+    /// token, or that it has none. `None`: provisioned before there was one.
+    #[serde(default)]
+    pub gh_uploads_revision: Option<String>,
     pub environment_id: String,
     /// Bearer tokens the proxy issued to T3 Code when it paired.
     pub client_tokens: Vec<String>,

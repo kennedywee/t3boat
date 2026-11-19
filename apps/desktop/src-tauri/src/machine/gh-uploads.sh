@@ -30,18 +30,39 @@ cat >"$HOME/.local/bin/gh" <<'WRAPPER'
 # GitHub App token gh has here. Everything else runs exactly as without this file.
 real=/usr/bin/gh
 token_file="$HOME/.t3boat/gh-upload-token"
-for arg in "$@"; do
-  case "$arg" in
-    --) break ;;
-    --attach | --attach=*)
-      if [ -s "$token_file" ]; then
-        GH_TOKEN="$(cat "$token_file")" exec "$real" "$@"
-      fi
-      echo "t3boat: uploads need \"GitHub uploads\" connected in t3boat's settings on your computer." >&2
-      break
-      ;;
+
+# Whether the command uploads a file: one of the commands that have --attach, with --attach given
+# as a flag. An `--attach` that is another flag's value (--body '--attach') is text, not an upload.
+uploads() {
+  case "${1:-} ${2:-}" in
+    "pr create" | "pr new" | "pr edit" | "pr comment") ;;
+    "issue create" | "issue new" | "issue edit" | "issue comment") ;;
+    *) return 1 ;;
   esac
-done
+  shift 2
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --) return 1 ;;
+      --attach | --attach=*) return 0 ;;
+      # These commands' flags that take a value: the next argument is not a flag.
+      -a | -b | -B | -F | -H | -l | -m | -p | -r | -R | -t | -T) shift ;;
+      --assignee | --base | --blocked-by | --blocking | --body | --body-file | --head | --label) shift ;;
+      --milestone | --parent | --project | --recover | --repo | --reviewer | --template | --title | --type) shift ;;
+      --add-assignee | --add-blocked-by | --add-blocking | --add-label | --add-project | --add-reviewer | --add-sub-issue) shift ;;
+      --remove-assignee | --remove-blocked-by | --remove-blocking | --remove-label | --remove-project) shift ;;
+      --remove-reviewer | --remove-sub-issue) shift ;;
+    esac
+    shift
+  done
+  return 1
+}
+
+if uploads "$@"; then
+  if [ -s "$token_file" ]; then
+    GH_TOKEN="$(cat "$token_file")" exec "$real" "$@"
+  fi
+  echo "t3boat: uploads need \"GitHub uploads\" connected in t3boat's settings on your computer." >&2
+fi
 exec "$real" "$@"
 WRAPPER
 chmod 755 "$HOME/.local/bin/gh"
