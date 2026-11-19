@@ -227,6 +227,10 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
         <SettingsView
           state={state}
           onSave={(settings) => call("update_settings", { settings }).catch((e) => toast(errorText(e)))}
+          onConnectUploads={() => call("connect_github_uploads", undefined).catch((e) => toast(errorText(e)))}
+          onDisconnectUploads={() =>
+            call("disconnect_github_uploads", undefined).catch((e) => toast(errorText(e)))
+          }
           onAddMcp={addMcp}
           onQuit={() => call("quit_app", undefined).catch((e) => toast(errorText(e)))}
           onBack={back}

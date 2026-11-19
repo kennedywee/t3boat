@@ -28,6 +28,9 @@ pub struct Machine {
     pub t3_version: String,
     /// `provision::revision()` of the scripts the machine runs.
     pub provision_revision: String,
+    /// `provision::gh_uploads_revision()` of what the machine has. `None`: unknown.
+    #[serde(default)]
+    pub gh_uploads_revision: Option<String>,
     pub environment_id: String,
     /// Bearer tokens the proxy issued to T3 Code when it paired.
     pub client_tokens: Vec<String>,
@@ -59,6 +62,15 @@ pub struct Settings {
     /// The user's fleet repo on GitHub (`owner/name`): skills and agent setup every machine clones
     /// and installs once with its `install.sh`. `None`: machines get no fleet.
     pub fleet_repo: Option<String>,
+}
+
+/// The user's own GitHub login, which machines use for `gh` uploads only. The token acts as the
+/// user until they revoke it on GitHub.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubUploads {
+    pub token: String,
+    pub login: Option<String>,
 }
 
 impl Default for Settings {
@@ -112,6 +124,7 @@ pub struct Spend {
 pub struct State {
     pub machines: Vec<Machine>,
     pub settings: Settings,
+    pub github_uploads: Option<GithubUploads>,
     /// By sandbox id.
     pub spend: HashMap<String, Spend>,
     /// Local ports of deleted machines, never given out again: T3 Code may still list one (it

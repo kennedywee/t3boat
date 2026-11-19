@@ -75,6 +75,14 @@ export interface UiState {
   sizes: Size[];
   /** null = that CLI isn't installed */
   mcp: Record<McpClient, boolean | null>;
+  githubUploads: GithubUploads;
+}
+
+export interface GithubUploads {
+  connected: boolean;
+  login: string | null;
+  /** while a sign-in waits: the code GitHub's page asks for */
+  code: string | null;
 }
 
 export interface MachineDetails {
@@ -135,6 +143,8 @@ export interface Commands {
   get_machine_details: [{ id: string }, MachineDetails];
   add_mcp: [{ client: McpClient }, void];
   update_settings: [{ settings: Settings }, void];
+  connect_github_uploads: [undefined, void]; // resolves once signed in, after the browser sign-in
+  disconnect_github_uploads: [undefined, void];
   setup_action: [{ action: SetupAction }, void];
   quit_app: [undefined, void];
 }

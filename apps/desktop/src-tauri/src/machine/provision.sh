@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs on a Boat sandbox, as `user`. Idempotent; also used to upgrade a machine.
-#   T3BOAT_SECRET=<watchdog-secret> provision.sh <t3-version> <sleep-after-secs> <snapshot-name> <mint-upstream-token:0|1> <name> <fleet-repo|->
-# Expects watchdog.mjs next to it. Prints one JSON line: {"environmentId", "upstreamToken"?}.
+#   T3BOAT_SECRET=<watchdog-secret> [T3BOAT_GH_UPLOAD_TOKEN=<token>] provision.sh <t3-version> <sleep-after-secs> <snapshot-name> <mint-upstream-token:0|1> <name> <fleet-repo|->
+# Expects watchdog.mjs and gh-uploads.sh next to it. Prints one JSON line: {"environmentId", "upstreamToken"?}.
 set -euo pipefail
 
 version="$1" sleep_after="$2" snapshot="$3" mint_upstream="$4" name="$5" fleet="${6:--}"
@@ -54,6 +54,10 @@ if ! git config --global user.email >/dev/null 2>&1; then
     fi
   fi
 fi
+
+# t3boat retries it by itself: a failure here must not fail the machine.
+bash "$here/gh-uploads.sh" || echo "GitHub uploads not set up yet" >&2
+unset T3BOAT_GH_UPLOAD_TOKEN
 
 "$t3" service install --allow-downgrade >/dev/null
 systemctl --user daemon-reload

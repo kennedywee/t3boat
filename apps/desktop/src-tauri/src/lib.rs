@@ -1,5 +1,6 @@
 pub mod app;
 pub mod boat;
+pub mod github;
 pub mod machine;
 #[cfg(target_os = "linux")]
 mod linux_tray;

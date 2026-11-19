@@ -10,20 +10,35 @@ use serde::Deserialize;
 
 const PROVISION_SH: &str = include_str!("provision.sh");
 const WATCHDOG_MJS: &str = include_str!("watchdog.mjs");
+const GH_UPLOADS_SH: &str = include_str!("gh-uploads.sh");
 const T3_PORT: u16 = 3773;
 const WATCHDOG_PORT: u16 = 3774;
 
+/// What the settings put on every machine.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Extras {
+    pub fleet: Option<String>,
+    pub gh_upload_token: Option<String>,
+}
+
 /// Identifies the provisioning scripts and the fleet repo; a machine provisioned with others gets
-/// them on wake, so a changed fleet setting reaches every machine.
-pub fn revision(fleet: Option<&str>) -> String {
+/// them on wake, so a changed fleet setting reaches every machine. The upload token is not part
+/// of it: a new one must not ask for an upgrade, which may restart T3.
+pub fn revision(extras: &Extras) -> String {
     let hash = fnv1a(
         PROVISION_SH
             .bytes()
             .chain(WATCHDOG_MJS.bytes())
             .chain(SLEEP_AFTER_SECS.to_string().bytes())
-            .chain(fleet.unwrap_or_default().bytes()),
+            .chain(extras.fleet.as_deref().unwrap_or_default().bytes()),
     );
     format!("{hash:016x}")
+}
+
+/// Identifies what `gh-uploads.sh` leaves on a machine: the script and the token, or none.
+pub fn gh_uploads_revision(extras: &Extras) -> String {
+    let token = extras.gh_upload_token.as_deref().unwrap_or_default();
+    format!("{:016x}", fnv1a(GH_UPLOADS_SH.bytes().chain([0]).chain(token.bytes())))
 }
 
 /// The fleet repo as `provision.sh` takes it: `owner/name`, or `-` for none.
@@ -94,31 +109,27 @@ pub async fn run(
     watchdog_secret: &str,
     snapshot: &str,
     mint_upstream_token: bool,
-    fleet: Option<&str>,
+    extras: &Extras,
 ) -> Result<Provisioned> {
     let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
     let script = format!(
         "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
          echo {p} | base64 -d > \"$d/provision.sh\"; echo {w} | base64 -d > \"$d/watchdog.mjs\"\n\
-         T3BOAT_SECRET={s} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet}\n",
+         echo {g} | base64 -d > \"$d/gh-uploads.sh\"\n\
+         T3BOAT_SECRET={s} T3BOAT_GH_UPLOAD_TOKEN={gh} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet}\n",
         p = b64(PROVISION_SH),
         w = b64(WATCHDOG_MJS),
+        g = b64(GH_UPLOADS_SH),
         v = shell_word(t3_version)?,
         s = shell_word(watchdog_secret)?,
         sleep = SLEEP_AFTER_SECS,
         snapshot = shell_word(snapshot)?,
         mint = u8::from(mint_upstream_token),
         name = shell_word(name)?,
-        fleet = fleet_word(fleet)?,
+        fleet = fleet_word(extras.fleet.as_deref())?,
+        gh = shell_word(extras.gh_upload_token.as_deref().unwrap_or_default())?,
     );
-    let name = format!("t3boat-provision-{}.sh", random_token());
-    let local = std::env::temp_dir().join(&name);
-    crate::store::write_private(&local, script.as_bytes())?;
-    let remote = format!("/tmp/{name}");
-    let uploaded = boat.upload(sandbox_id, &local, &remote).await;
-    let _ = std::fs::remove_file(&local);
-    uploaded?;
-    let out = boat.exec_ok(sandbox_id, &format!("bash {remote}"), 600).await?;
+    let out = run_uploaded(boat, sandbox_id, &script, 600).await?;
     let line = out
         .lines()
         .rev()
@@ -127,10 +138,37 @@ pub async fn run(
     Ok(serde_json::from_str(line)?)
 }
 
+/// Runs `script` from an uploaded file that removes itself: a token in it never reaches a command
+/// line, which `boat history` keeps. Returns stdout.
+async fn run_uploaded(boat: &Boat, sandbox_id: &str, script: &str, timeout_secs: u64) -> Result<String> {
+    let name = format!("t3boat-provision-{}.sh", random_token());
+    let local = std::env::temp_dir().join(&name);
+    crate::store::write_private(&local, script.as_bytes())?;
+    let remote = format!("/tmp/{name}");
+    let uploaded = boat.upload(sandbox_id, &local, &remote).await;
+    let _ = std::fs::remove_file(&local);
+    uploaded?;
+    boat.exec_ok(sandbox_id, &format!("bash {remote}"), timeout_secs).await
+}
+
+/// Runs one part of `gh-uploads.sh` (`upgrade` or `apply`) on a running machine.
+pub async fn gh_uploads(boat: &Boat, sandbox_id: &str, part: &str, extras: &Extras) -> Result<()> {
+    let script = format!(
+        "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
+         echo {g} | base64 -d > \"$d/gh-uploads.sh\"\n\
+         T3BOAT_GH_UPLOAD_TOKEN={gh} bash \"$d/gh-uploads.sh\" {part}\n",
+        part = shell_word(part)?,
+        g = base64::engine::general_purpose::STANDARD.encode(GH_UPLOADS_SH),
+        gh = shell_word(extras.gh_upload_token.as_deref().unwrap_or_default())?,
+    );
+    run_uploaded(boat, sandbox_id, &script, 400).await.map(drop)
+}
+
 /// Only `[A-Za-z0-9._-]` reaches the remote shell.
 fn shell_word(s: &str) -> Result<&str> {
     if !s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
-        bail!("unsafe value for the remote shell: {s}");
+        // Not the value itself: it may be a token.
+        bail!("unsafe value for the remote shell ({} characters)", s.chars().count());
     }
     Ok(s)
 }
@@ -149,7 +187,7 @@ pub async fn create(
     size: &str,
     t3_version: &str,
     local_port: u16,
-    fleet: Option<&str>,
+    extras: &Extras,
     created: impl FnOnce(&str),
     progress: impl Fn(&str),
 ) -> Result<Machine> {
@@ -162,7 +200,7 @@ pub async fn create(
     created(&id);
     progress("Installing T3 Code");
     let secret = random_token();
-    let provisioned = run(boat, &id, name, t3_version, &secret, &snapshot_name(name, &id), true, fleet).await?;
+    let provisioned = run(boat, &id, name, t3_version, &secret, &snapshot_name(name, &id), true, extras).await?;
     progress("Opening the machine's address");
     let (upstream_url, watchdog_url) = host(boat, &id).await?;
     Ok(Machine {
@@ -178,7 +216,8 @@ pub async fn create(
         watchdog_secret: secret,
         local_port,
         t3_version: t3_version.to_owned(),
-        provision_revision: revision(fleet),
+        provision_revision: revision(extras),
+        gh_uploads_revision: None,
         environment_id: provisioned.environment_id,
         client_tokens: Vec::new(),
         link_tokens: Vec::new(),

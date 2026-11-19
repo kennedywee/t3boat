@@ -15,7 +15,7 @@ use crate::proxy::cache::{self, Cache};
 use crate::proxy::classify;
 use crate::proxy::threads;
 use crate::proxy::upstream;
-use crate::store::{Machine, Settings};
+use crate::store::{GithubUploads, Machine, Settings};
 use crate::t3desktop::T3Desktop;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,7 @@ const DUE_WAKE_RETRY: Duration = Duration::from_secs(5 * 60);
 /// A running machine's link is checked this often: links can be turned on, fail or near expiry
 /// while it stays up.
 const LINK_CHECK: Duration = Duration::from_secs(10 * 60);
+const GH_UPLOADS_RETRY: Duration = Duration::from_secs(60);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Power {
@@ -130,11 +131,18 @@ pub struct Shared {
     pub boat: Boat,
     pub t3: T3Desktop,
     pub settings: RwLock<Settings>,
+    pub github_uploads: RwLock<Option<GithubUploads>>,
     pub events: mpsc::UnboundedSender<Event>,
     pub http: reqwest::Client,
 }
 
 impl Shared {
+    pub fn extras(&self) -> provision::Extras {
+        provision::Extras {
+            fleet: self.settings.read().unwrap().fleet_repo.clone(),
+            gh_upload_token: self.github_uploads.read().unwrap().as_ref().map(|g| g.token.clone()),
+        }
+    }
     pub fn changed(&self) {
         let _ = self.events.send(Event::Changed);
     }
@@ -158,6 +166,11 @@ pub struct MachineRuntime {
     watchdog: Mutex<Option<WatchdogStatus>>,
     /// One wake at a time; a delete takes it too, so no restore swaps the sandbox under it.
     pub(crate) waking: tokio::sync::Mutex<()>,
+    /// One change to the machine at a time. Each reads the settings once it holds this, so a
+    /// disconnect that overtakes a connect still wins.
+    provisioning: tokio::sync::Mutex<()>,
+    /// The loop's "GitHub uploads" try: for which settings, and when it failed (`None`: running).
+    gh_uploads_try: Mutex<Option<(String, Option<Instant>)>>,
     /// One capture at a time: "sleep now" and the background poll can see the same drain.
     capturing: tokio::sync::Mutex<()>,
     last_heartbeat: Mutex<Option<Instant>>,
@@ -185,6 +198,8 @@ impl MachineRuntime {
             stopped_at: Mutex::new(None),
             watchdog: Mutex::new(None),
             waking: tokio::sync::Mutex::new(()),
+            provisioning: tokio::sync::Mutex::new(()),
+            gh_uploads_try: Mutex::new(None),
             capturing: tokio::sync::Mutex::new(()),
             last_heartbeat: Mutex::new(None),
             stop_seen: Mutex::new(None),
@@ -537,22 +552,40 @@ impl MachineRuntime {
         Ok(())
     }
 
-    /// The fleet repo machines clone, from the app's settings.
-    fn fleet_repo(&self) -> Option<String> {
-        self.shared.settings.read().unwrap().fleet_repo.clone()
+    /// Leaves the running machine with the settings' upload token, or without one.
+    async fn bring_gh_uploads(&self) -> Result<()> {
+        let (boat, id) = (&self.shared.boat, self.sandbox_id());
+        // Outside the lock: apt can take minutes, and a disconnect must not wait behind it.
+        if self.shared.extras().gh_upload_token.is_some() {
+            let _ = provision::gh_uploads(boat, &id, "upgrade", &provision::Extras::default()).await;
+        }
+        let _one = self.provisioning.lock().await;
+        let extras = self.shared.extras();
+        let revision = provision::gh_uploads_revision(&extras);
+        if self.record().gh_uploads_revision.as_deref() == Some(&revision) {
+            return Ok(());
+        }
+        // A run that fails part way may have changed the token already.
+        self.update_record(|m| m.gh_uploads_revision = None);
+        provision::gh_uploads(boat, &id, "apply", &extras).await?;
+        self.update_record(|m| m.gh_uploads_revision = Some(revision));
+        Ok(())
     }
 
     /// Keeps the machine on the desktop app's T3 version, this app's scripts and the fleet setting.
     pub async fn upgrade_if_needed(&self) -> Result<()> {
+        let _one = self.provisioning.lock().await;
         let desktop = self.shared.t3.version().await?;
-        let fleet = self.fleet_repo();
-        let revision = provision::revision(fleet.as_deref());
+        let extras = self.shared.extras();
+        let revision = provision::revision(&extras);
         let record = self.record();
         let new_server = desktop != record.t3_version;
         if !new_server && revision == record.provision_revision {
             return Ok(());
         }
         tracing::info!("upgrading {} (T3 {desktop}, scripts {revision})", self.id());
+        // provision.sh runs gh-uploads.sh but does not say whether it worked: the loop finds out.
+        self.update_record(|m| m.gh_uploads_revision = None);
         provision::run(
             &self.shared.boat,
             &record.sandbox_id,
@@ -561,7 +594,7 @@ impl MachineRuntime {
             &record.watchdog_secret,
             &provision::snapshot_name(&record.name, &record.id),
             false,
-            fleet.as_deref(),
+            &extras,
         )
         .await?;
         self.update_record(|m| {
@@ -715,7 +748,7 @@ impl MachineRuntime {
         self.ensure_awake().await?;
         // Older scripts lack keep-awake: take this app's now, which restarts T3, so never
         // mid-turn. Ending a hold works with any watchdog that has one.
-        if minutes != Some(0) && self.record().provision_revision != provision::revision(self.fleet_repo().as_deref()) {
+        if minutes != Some(0) && self.record().provision_revision != provision::revision(&self.shared.extras()) {
             if self.watchdog_get("/status?fresh").await?.busy {
                 bail!("needs a quick update first; try again once its agents finish");
             }
@@ -928,6 +961,36 @@ impl MachineRuntime {
                         if came_up {
                             this.refresh_projects().await;
                             this.refresh_connect().await;
+                        }
+                    });
+                }
+                // The same settings wait for their try to end, then to be retried; a newer change
+                // or a wake goes at once.
+                let gh_uploads = provision::gh_uploads_revision(&self.shared.extras());
+                let start = {
+                    let mut last = self.gh_uploads_try.lock().unwrap();
+                    if came_up && last.as_ref().is_some_and(|(_, failed)| failed.is_some()) {
+                        *last = None;
+                    }
+                    let waits = last.as_ref().is_some_and(|(revision, failed)| {
+                        *revision == gh_uploads && failed.is_none_or(|at| at.elapsed() < GH_UPLOADS_RETRY)
+                    });
+                    let start = !waits && self.record().gh_uploads_revision.as_deref() != Some(&gh_uploads);
+                    if start {
+                        *last = Some((gh_uploads.clone(), None));
+                    }
+                    start
+                };
+                if start {
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        let result = this.bring_gh_uploads().await;
+                        if let Err(e) = &result {
+                            tracing::warn!("bringing GitHub uploads to {}: {e:#}", this.id());
+                        }
+                        let mut last = this.gh_uploads_try.lock().unwrap();
+                        if last.as_ref().is_some_and(|(revision, _)| *revision == gh_uploads) {
+                            *last = result.is_err().then(|| (gh_uploads, Some(Instant::now())));
                         }
                     });
                 }

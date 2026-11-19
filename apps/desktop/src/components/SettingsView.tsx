@@ -59,11 +59,22 @@ interface Props {
   onSave: (s: Settings) => void;
   /** never rejects; errors are shown by the caller */
   onAddMcp: (client: McpClient) => Promise<void>;
+  /** never rejects; resolves once signed in or given up */
+  onConnectUploads: () => Promise<void>;
+  onDisconnectUploads: () => void;
   onQuit: () => void;
   onBack: () => void;
 }
 
-export function SettingsView({ state, onSave, onAddMcp, onQuit, onBack }: Props) {
+export function SettingsView({
+  state,
+  onSave,
+  onAddMcp,
+  onConnectUploads,
+  onDisconnectUploads,
+  onQuit,
+  onBack,
+}: Props) {
   // optimistic copy; the next "state" event is the source of truth
   const [s, setS] = useState(state.settings);
   useEffect(() => setS(state.settings), [state.settings]);
@@ -78,6 +89,13 @@ export function SettingsView({ state, onSave, onAddMcp, onQuit, onBack }: Props)
     setAdding(client);
     onAddMcp(client).finally(() => setAdding(null));
   };
+  const uploads = state.githubUploads;
+  const [connecting, setConnecting] = useState(false);
+  const connect = () => {
+    setConnecting(true);
+    onConnectUploads().finally(() => setConnecting(false));
+  };
+
   const missing = CLIENTS.filter((c) => state.mcp[c.id] === null).map((c) => c.name);
 
   const change = (p: Partial<Settings>) => {
@@ -104,6 +122,44 @@ export function SettingsView({ state, onSave, onAddMcp, onQuit, onBack }: Props)
           />
         </label>
         <FleetRepo value={s.fleetRepo ?? ""} onSave={(repo) => change({ fleetRepo: repo || null })} />
+        <div className="setting">
+          <span className="caption">github</span>
+          <span className="setting-name">GitHub uploads</span>
+          <div className="mcp-buttons">
+            {uploads.connected ? (
+              <>
+                <span className="mcp-added">
+                  <Icon name="check" size={10} />
+                  <span>{uploads.login ? `Connected as ${uploads.login}` : "Connected"}</span>
+                </span>
+                <button className="btn btn-sm btn-quiet" onClick={onDisconnectUploads}>
+                  Disconnect
+                </button>
+              </>
+            ) : (
+              <button className="btn btn-sm btn-outline" disabled={connecting} aria-busy={connecting} onClick={connect}>
+                {connecting ? (
+                  <>
+                    <Dots /> Waiting for GitHub…
+                  </>
+                ) : (
+                  "Connect GitHub"
+                )}
+              </button>
+            )}
+          </div>
+          <span className="hint" aria-live="polite">
+            {uploads.code ? (
+              <>
+                Enter <code className="step-code">{uploads.code}</code> on the GitHub page that opened.
+              </>
+            ) : uploads.connected ? (
+              "Machines use this login only to upload images and videos. Disconnecting takes it off them; to revoke it, remove GitHub CLI under GitHub → Settings → Applications."
+            ) : (
+              "Lets agents on machines attach images and videos to pull requests and issues (gh … --attach). GitHub refuses those uploads from the login Boat gives a machine, so this adds your own, for uploads only."
+            )}
+          </span>
+        </div>
         <div className="setting">
           <span className="caption">mcp</span>
           <span className="setting-name">

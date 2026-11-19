@@ -54,6 +54,10 @@ interface UiState {
   mcp: { claudeCode: boolean | null; codex: boolean | null };
                                    // t3boat registered as an MCP server in that CLI; null = CLI not installed
                                    // (Settings → "Coding agents" disables its button with a hint)
+  githubUploads: { connected: boolean; login: string | null; code: string | null };
+                                   // the user's own GitHub login on machines, for uploads only. login: the
+                                   // account's name when known; code: while a sign-in waits, the code
+                                   // GitHub's page asks for
 }
 ```
 
@@ -95,6 +99,8 @@ interface MachineDetails {
 | `get_machine_details` | `{ id }` | → `MachineDetails`; should work while asleep (from cache / Boat API, without waking it). Rejection = toast, last data stays |
 | `add_mcp` | `{ client }` | `"claudeCode" \| "codex"`: registers t3boat as an MCP server in that CLI's config so its agents can control t3boat; resolves when done, then `UiState.mcp[client]` is `true` |
 | `update_settings` | `{ settings }` | full settings object |
+| `connect_github_uploads` | none | "GitHub uploads": runs this computer's `gh` browser sign-in in a config folder of its own, opens GitHub's device page and shows the code as `UiState.githubUploads.code`; resolves once signed in (up to 15 min). Rejects when `gh` is not installed here |
+| `disconnect_github_uploads` | none | forgets the login and takes it off the machines; the token stays valid on GitHub until revoked there |
 | `setup_action` | `{ action }` | `"installBoat" \| "signInBoat" \| "installT3" \| "recheck"` |
 | `quit_app` | – | |
 
