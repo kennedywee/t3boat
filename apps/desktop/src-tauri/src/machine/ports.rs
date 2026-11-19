@@ -19,10 +19,11 @@ use tokio::task::{JoinHandle, JoinSet};
 /// Each forward is a `boat forward` process of its own.
 pub const MAX_FORWARDS: usize = 20;
 
-/// Sockets that listen on the machine, then its containers' published ports. Root sees the
-/// process names of other users' sockets (a container's `docker-proxy`).
+/// Sockets that listen on the machine, then its containers' published ports, then its Boat
+/// links. Root sees the process names of other users' sockets (a container's `docker-proxy`).
 const SCAN: &str = "(sudo -n ss -ltnpH 2>/dev/null || ss -ltnpH); echo ---; \
-                    docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null; true";
+                    docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null; echo ---; \
+                    \"$HOME/.ascii/host\" list 2>/dev/null; true";
 
 /// What the machine's image runs for Boat itself: its agent, desktop stream, name services.
 const SYSTEM: &[&str] =
@@ -103,7 +104,12 @@ impl MachineRuntime {
             return Ok(());
         }
         let out = self.shared.boat.exec_ok(&self.sandbox_id(), SCAN, 20).await?;
-        *self.ports.listening.lock().unwrap() = parse_scan(&out);
+        let (listening, links) = parse_scan(&out);
+        *self.ports.listening.lock().unwrap() = listening;
+        // Links are also made on the machine itself, by a project's scripts or an agent.
+        if let Some(links) = links.filter(|l| *l != self.record().links) {
+            self.update_record(|m| m.links = links);
+        }
         self.shared.changed();
         Ok(())
     }
@@ -254,9 +260,25 @@ impl MachineRuntime {
     }
 }
 
-/// Ports worth showing from `SCAN`'s output: unprivileged, not T3's own, not the image's.
-fn parse_scan(out: &str) -> BTreeMap<u16, Listening> {
-    let (sockets, containers) = out.split_once("---").unwrap_or((out, ""));
+/// From `SCAN`'s output: the ports worth showing (unprivileged, not T3's own, not the image's),
+/// and the machine's links, `None` when its link list could not be read.
+fn parse_scan(out: &str) -> (BTreeMap<u16, Listening>, Option<Vec<PortLink>>) {
+    let mut parts = out.split("---");
+    let (sockets, containers, hosted) =
+        (parts.next().unwrap_or_default(), parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+    // `4001  https://box-…-4001.on.ascii.dev?_token=… (gated) -`, after a header line. A link
+    // taken away stays listed as `(down)`.
+    let links = hosted.trim_start().starts_with("port").then(|| {
+        let rows = hosted.lines().filter(|line| !line.contains("(down)"));
+        rows.filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let port: u16 = fields.next()?.parse().ok()?;
+            let url = fields.next().filter(|url| url.starts_with("https://"))?;
+            // The machine's tool still prints Boat's older domain for the same address.
+            (!provision::own_port(port)).then(|| PortLink { port, url: url.replacen(".on.ascii.dev", ".on.boat.dev", 1) })
+        })
+        .collect()
+    });
     let mut published = HashMap::new();
     for line in containers.lines() {
         let Some((name, ports)) = line.trim().split_once(' ') else { continue };
@@ -282,7 +304,7 @@ fn parse_scan(out: &str) -> BTreeMap<u16, Listening> {
         let entry = found.entry(port).or_insert(Listening { name, loopback });
         entry.loopback &= loopback;
     }
-    found
+    (found, links)
 }
 
 /// The port of `0.0.0.0:4000`, `[::]:22` or `*:8090`.
@@ -315,8 +337,24 @@ flowfokus-portal 0.0.0.0:4001->4001/tcp, [::]:4001->4001/tcp
 flowfokus-jobs 4000/tcp
 flowfokus-server 0.0.0.0:4000->4000/tcp
 flowfokus-db 127.0.0.1:54329->5432/tcp
+---
+port  url                                          title
+3773  https://box-node-ab12-3773.on.ascii.dev (localhost) -
+4100  https://box-node-ab12-4100.on.ascii.dev -
+4001  https://box-node-ab12-4001.on.ascii.dev?_token=t0k3n (gated) -
+4002  https://box-node-ab12-4002.on.ascii.dev?_token=0ld (gated) (down) -
 "#;
-        let scan = parse_scan(out);
+        let (scan, links) = parse_scan(out);
+        let links: Vec<(u16, String)> = links.unwrap().into_iter().map(|l| (l.port, l.url)).collect();
+        assert_eq!(
+            links,
+            vec![
+                (4100, "https://box-node-ab12-4100.on.boat.dev".to_owned()),
+                (4001, "https://box-node-ab12-4001.on.boat.dev?_token=t0k3n".to_owned()),
+            ]
+        );
+        // No link list (not a Boat image, or the tool failed): the links known stay.
+        assert_eq!(parse_scan("LISTEN 0 511 *:5173 *:* users:((\"node\",pid=900,fd=20))\n---\n---\n").1, None);
         let found: Vec<(u16, Option<&str>, bool)> =
             scan.iter().map(|(p, l)| (*p, l.name.as_deref(), l.loopback)).collect();
         assert_eq!(
