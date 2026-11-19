@@ -586,6 +586,8 @@ impl MachineRuntime {
         if self.record().gh_uploads_revision.as_deref() == Some(&revision) {
             return Ok(());
         }
+        // Unknown until it has run through: one that fails part way may have changed the token.
+        self.update_record(|m| m.gh_uploads_revision = None);
         provision::gh_uploads(&self.shared.boat, &self.sandbox_id(), &extras).await?;
         self.update_record(|m| m.gh_uploads_revision = Some(revision));
         Ok(())
@@ -604,6 +606,9 @@ impl MachineRuntime {
             return Ok(());
         }
         tracing::info!("upgrading {} (T3 {desktop}, scripts {revision})", self.id());
+        // Provisioning changes the "GitHub uploads" token and may fail at a later step: until it
+        // has run through, what the machine holds is unknown, so the next change goes over again.
+        self.update_record(|m| m.gh_uploads_revision = None);
         provision::run(
             &self.shared.boat,
             &record.sandbox_id,

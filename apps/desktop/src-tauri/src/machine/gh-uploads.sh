@@ -22,8 +22,10 @@ if [ -f "$gh_list" ]; then
     echo "gh upgrade failed: see ~/.t3boat/gh-upgrade.log" >&2
   fi
 fi
+# This runs while agents work, so each file is written whole under another name and renamed into
+# place: a `gh` started meanwhile reads the old file or the new one, never half of one.
 mkdir -p "$HOME/.local/bin"
-cat >"$HOME/.local/bin/gh" <<'WRAPPER'
+cat >"$HOME/.local/bin/gh.t3boat-new" <<'WRAPPER'
 #!/usr/bin/env bash
 # t3boat: runs Boat's gh. A command that uploads a file (--attach) runs with the user's own GitHub
 # token from "GitHub uploads" in t3boat's settings, since GitHub's upload server turns away the
@@ -34,16 +36,12 @@ token_file="$HOME/.t3boat/gh-upload-token"
 # Whether the command uploads a file: one of the commands that have --attach, with --attach given
 # as a flag. An `--attach` that is another flag's value (--body '--attach') is text, not an upload.
 uploads() {
-  case "${1:-} ${2:-}" in
-    "pr create" | "pr new" | "pr edit" | "pr comment") ;;
-    "issue create" | "issue new" | "issue edit" | "issue comment") ;;
-    *) return 1 ;;
-  esac
-  shift 2
+  # The command is the first two words that are not flags: `gh pr -R owner/repo edit 7` is `pr edit`.
+  local command="" words=0 attach=1
   while [ $# -gt 0 ]; do
     case "$1" in
-      --) return 1 ;;
-      --attach | --attach=*) return 0 ;;
+      --) break ;;
+      --attach | --attach=*) attach=0 ;;
       # These commands' flags that take a value: the next argument is not a flag.
       -a | -b | -B | -F | -H | -l | -m | -p | -r | -R | -t | -T) shift ;;
       --assignee | --base | --blocked-by | --blocking | --body | --body-file | --head | --label) shift ;;
@@ -51,10 +49,22 @@ uploads() {
       --add-assignee | --add-blocked-by | --add-blocking | --add-label | --add-project | --add-reviewer | --add-sub-issue) shift ;;
       --remove-assignee | --remove-blocked-by | --remove-blocking | --remove-label | --remove-project) shift ;;
       --remove-reviewer | --remove-sub-issue) shift ;;
+      -*) ;;
+      *)
+        if [ "$words" -lt 2 ]; then
+          command="$command $1"
+          words=$((words + 1))
+        fi
+        ;;
     esac
     shift
   done
-  return 1
+  case "$command" in
+    " pr create" | " pr new" | " pr edit" | " pr comment") ;;
+    " issue create" | " issue new" | " issue edit" | " issue comment") ;;
+    *) return 1 ;;
+  esac
+  return "$attach"
 }
 
 if uploads "$@"; then
@@ -65,9 +75,11 @@ if uploads "$@"; then
 fi
 exec "$real" "$@"
 WRAPPER
-chmod 755 "$HOME/.local/bin/gh"
+chmod 755 "$HOME/.local/bin/gh.t3boat-new"
+mv -f "$HOME/.local/bin/gh.t3boat-new" "$HOME/.local/bin/gh"
 if [ -n "${T3BOAT_GH_UPLOAD_TOKEN:-}" ]; then
-  (umask 077 && printf '%s' "$T3BOAT_GH_UPLOAD_TOKEN" >"$boat_dir/gh-upload-token")
+  (umask 077 && printf '%s' "$T3BOAT_GH_UPLOAD_TOKEN" >"$boat_dir/gh-upload-token.new")
+  mv -f "$boat_dir/gh-upload-token.new" "$boat_dir/gh-upload-token"
 else
   rm -f "$boat_dir/gh-upload-token"
 fi
