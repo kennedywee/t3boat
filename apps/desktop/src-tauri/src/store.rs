@@ -45,6 +45,9 @@ pub struct Machine {
     /// T3 Connect is on there: other devices reach it with the user's T3 account.
     #[serde(default)]
     pub connect: bool,
+    /// Ports forwarded to this computer at the same number while the machine runs.
+    #[serde(default)]
+    pub forwards: Vec<u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

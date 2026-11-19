@@ -89,6 +89,25 @@ export const openIn = (thread: string | null): Action => ({
   thread: thread ?? undefined,
 });
 
+/** As many forwards as a machine takes: each is a process on this computer. */
+export const MAX_FORWARDS = 20;
+
+/** Ports from what a person types: "4000", "4000 4001", "3000-3010". Throws what is wrong with it. */
+export function parsePorts(text: string): number[] {
+  const ports = new Set<number>();
+  for (const part of text.split(/[\s,]+/).filter(Boolean)) {
+    const range = /^(\d+)(?:-(\d+))?$/.exec(part);
+    if (!range) throw `${part} is not a port or a range like 3000-3010`;
+    const from = Number(range[1]);
+    const to = Number(range[2] ?? range[1]);
+    if (from < 1 || to > 65535 || from > to) throw `${part} is not a port between 1 and 65535`;
+    if (to - from >= MAX_FORWARDS) throw `At most ${MAX_FORWARDS} ports at a time`;
+    for (let p = from; p <= to; p++) ports.add(p);
+  }
+  if (ports.size > MAX_FORWARDS) throw `At most ${MAX_FORWARDS} ports at a time`;
+  return [...ports];
+}
+
 /** "Stay awake for…" choices, in minutes. */
 export const STAY_AWAKE = [15, 30, 60, 120] as const;
 

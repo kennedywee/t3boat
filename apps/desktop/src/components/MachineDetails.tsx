@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { useMachineDetails, useLatestThread } from "../api";
-import type { MachineDetails as Details, LocalProject, MachineView, Size } from "../types";
+import { call, errorText, useMachineDetails, useLatestThread } from "../api";
+import type { MachineDetails as Details, LocalProject, MachineView, PortView, Size } from "../types";
 import {
   ACTIONS,
   autoSleep,
@@ -12,6 +12,7 @@ import {
   money,
   powerAction,
   openIn,
+  parsePorts,
   primaryAction,
   resizeHint,
   resizeTo,
@@ -42,6 +43,8 @@ interface Props {
   onAddProject: (p: LocalProject) => void;
   onDismissDeleteError: () => void;
   onError: (text: string) => void;
+  /** a failed change made from this view */
+  onFailed: (text: string) => void;
   onBack: () => void;
 }
 
@@ -56,6 +59,7 @@ export function MachineDetails({
   onAddProject,
   onDismissDeleteError,
   onError,
+  onFailed,
   onBack,
 }: Props) {
   const d = useMachineDetails(m.id, version, onError);
@@ -77,6 +81,7 @@ export function MachineDetails({
         <Agents m={m} d={d} pending={pending} onAction={onAction} />
         <Connect m={m} d={d} pending={pending} onAction={onAction} />
         <Projects m={m} pickProject={pickProject} onAddProject={onAddProject} />
+        {gone ? null : <Ports m={m} d={d} onError={onFailed} />}
         <MachineMore
           m={m}
           sizes={sizes}
@@ -431,6 +436,145 @@ function Projects({
   );
 }
 
+/** Its dev servers in this computer's browser: each forwarded port is `localhost:<port>` here too. */
+function Ports({ m, d, onError }: { m: MachineView; d: Details | null; onError: (text: string) => void }) {
+  const up = m.state === "working" || m.state === "idle";
+  const [busy, setBusy] = useState<Record<number, boolean>>({});
+  const [scanning, setScanning] = useState(false);
+  const [text, setText] = useState("");
+
+  // a ref: a new `onError` must not start another scan
+  const failed = useRef(onError);
+  failed.current = onError;
+  const scan = useCallback(() => {
+    setScanning(true);
+    call("scan_ports", { id: m.id })
+      .catch((e) => failed.current(errorText(e)))
+      .finally(() => setScanning(false));
+  }, [m.id]);
+  // on open, and again when it wakes: what listens changes while it sleeps for nobody
+  useEffect(() => {
+    if (up) scan();
+  }, [up, scan]);
+
+  const forward = (ports: number[], on: boolean) => {
+    if (!ports.length) return Promise.resolve(false);
+    setBusy((b) => ({ ...b, ...Object.fromEntries(ports.map((p) => [p, on])) }));
+    return call("forward_ports", { id: m.id, ports, on })
+      .then(
+        () => true,
+        (e) => (onError(errorText(e)), false),
+      )
+      .finally(() => setBusy((b) => Object.fromEntries(Object.entries(b).filter(([p]) => !ports.includes(Number(p))))));
+  };
+
+  const add = () => {
+    try {
+      forward(parsePorts(text), true).then((ok) => ok && setText(""));
+    } catch (e) {
+      onError(errorText(e));
+    }
+  };
+
+  const ports = d?.ports ?? [];
+  const rest = ports.filter((p) => p.listening && !p.forwarded).map((p) => p.port);
+  const working = Object.keys(busy).length > 0;
+  return (
+    <Section
+      title="ports"
+      count={ports.filter((p) => p.forwarded).length}
+      extra={
+        <>
+          {rest.length > 1 ? (
+            <button className="btn btn-link" disabled={working} onClick={() => forward(rest, true)}>
+              Forward all
+            </button>
+          ) : null}
+          {up ? (
+            <button className="btn btn-link" disabled={scanning} onClick={scan}>
+              {scanning ? "Looking…" : "Rescan"}
+            </button>
+          ) : null}
+        </>
+      }
+    >
+      <ul className="lines">
+        {d ? ports.map((p) => <PortLine key={p.port} p={p} want={busy[p.port]} onForward={forward} onError={onError} />) : <Skeleton rows={2} />}
+        {d && !ports.length ? (
+          <li className="line">
+            <span className="line-main line-dim">
+              {up ? (scanning ? "Looking for dev servers…" : "No dev servers found") : "Dev servers show once it is awake"}
+            </span>
+          </li>
+        ) : null}
+        <li className="line">
+          <form
+            className="port-add"
+            onSubmit={(e) => {
+              e.preventDefault();
+              add();
+            }}
+          >
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Port or range: 5173, 3000-3010"
+              aria-label="Port or range to forward"
+              spellCheck={false}
+            />
+            <button className="btn btn-sm btn-quiet" disabled={!text.trim() || working}>
+              Forward
+            </button>
+          </form>
+        </li>
+      </ul>
+      <span className="hint port-hint">Same port on this computer. A request through one keeps the machine awake.</span>
+    </Section>
+  );
+}
+
+function PortLine({
+  p,
+  want,
+  onForward,
+  onError,
+}: {
+  p: PortView;
+  /** the switch's position while a change runs */
+  want: boolean | undefined;
+  onForward: (ports: number[], on: boolean) => void;
+  onError: (text: string) => void;
+}) {
+  const note = p.error ?? (p.listening ? p.name : "nothing listening");
+  return (
+    <li className="line">
+      <span className="line-main port" title={p.error ?? undefined}>
+        {p.live ? (
+          <button
+            className="btn btn-link port-link"
+            onClick={() => call("open_port", { port: p.port }).catch((e) => onError(errorText(e)))}
+          >
+            localhost:{p.port}
+            <Icon name="open" size={8} />
+          </button>
+        ) : (
+          <span className="port-number">{p.port}</span>
+        )}
+        {note ? <span className={`caption port-note${p.error ? " is-error" : ""}`}>{note}</span> : null}
+      </span>
+      {want !== undefined ? <Dots /> : null}
+      <input
+        type="checkbox"
+        role="switch"
+        className="switch"
+        aria-label={`Forward port ${p.port}`}
+        checked={want ?? p.forwarded}
+        disabled={want !== undefined}
+        onChange={(e) => onForward([p.port], e.target.checked)}
+      />
+    </li>
+  );
+}
 
 /** The rare stuff: size and delete, folded away. */
 function MachineMore({

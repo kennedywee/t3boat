@@ -14,6 +14,11 @@ const GH_UPLOADS_SH: &str = include_str!("gh-uploads.sh");
 const T3_PORT: u16 = 3773;
 const WATCHDOG_PORT: u16 = 3774;
 
+/// A port t3boat's own services listen on there.
+pub fn own_port(port: u16) -> bool {
+    matches!(port, T3_PORT | WATCHDOG_PORT)
+}
+
 /// What the settings put on every machine.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Extras {
@@ -224,5 +229,6 @@ pub async fn create(
         created_at: chrono::Utc::now().timestamp(),
         next_due_at: None,
         connect: false,
+        forwards: Vec::new(),
     })
 }

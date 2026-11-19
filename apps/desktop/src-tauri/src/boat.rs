@@ -301,22 +301,30 @@ impl Boat {
         self.run(&["scp", path_str(local)?, &to], Duration::from_secs(1800)).await.map(drop)
     }
 
-    /// Forwards `port` on this computer to the same port in the sandbox, for as long as the
-    /// returned process lives.
-    pub async fn forward(&self, id: &str, port: u16) -> Result<tokio::process::Child> {
+    /// Forwards `local` on this computer to `remote` in the sandbox, for as long as the returned
+    /// process lives.
+    pub async fn forward(&self, id: &str, remote: u16, local: u16) -> Result<tokio::process::Child> {
         // Else another listener on the port would pass the readiness check below.
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
-            bail!("port {port} is in use on this computer; finish or close the other sign-in first");
+        if std::net::TcpListener::bind(("127.0.0.1", local)).is_err() {
+            bail!("port {local} is in use on this computer");
         }
+        let (port, remote) = (local, remote.to_string());
         let p = port.to_string();
-        let mut child = command(&self.bin)
-            .args(["forward", id, "--remote", &p, "--local", &p])
+        let mut cmd = command(&self.bin);
+        cmd.args(["forward", id, "--remote", &remote, "--local", &p])
             .env("BOAT_NO_UPDATE", "1")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .context("running boat forward")?;
+            .kill_on_drop(true);
+        // A tunnel must not outlive this app when it is killed: nothing is dropped then.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().context("running boat forward")?;
         for _ in 0..100 {
             if let Some(status) = child.try_wait()? {
                 bail!("boat forward exited ({status}); is port {port} free on this computer?");

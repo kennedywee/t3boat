@@ -516,6 +516,24 @@ async fn keep_awake(ui: State<'_, Ui>, id: String, minutes: Option<u32>) -> Res 
     ui.app()?.machine(&id).map_err(err)?.keep_awake(minutes).await.map_err(err)
 }
 
+/// Looks for dev servers on the machine; `get_machine_details` then lists them. Never wakes it.
+#[tauri::command]
+async fn scan_ports(ui: State<'_, Ui>, id: String) -> Res {
+    ui.app()?.machine(&id).map_err(err)?.scan_ports().await.map_err(err)
+}
+
+/// Forwards the machine's `ports` to the same ports on this computer, or stops (`on: false`).
+#[tauri::command]
+async fn forward_ports(ui: State<'_, Ui>, id: String, ports: Vec<u16>, on: bool) -> Res {
+    ui.app()?.machine(&id).map_err(err)?.set_forwards(&ports, on).await.map_err(err)
+}
+
+/// Opens a forwarded port in the browser.
+#[tauri::command]
+fn open_port(port: u16) -> Res {
+    app::open_url(&format!("http://localhost:{port}")).map_err(err)
+}
+
 #[tauri::command]
 async fn resize_machine(ui: State<'_, Ui>, id: String, size: String) -> Res {
     ui.app()?.machine(&id).map_err(err)?.resize(&size).await.map_err(err)
@@ -669,6 +687,9 @@ pub fn run() {
             keep_awake,
             sign_in_agent,
             turn_on_connect,
+            scan_ports,
+            forward_ports,
+            open_port,
             get_machine_details,
             latest_thread,
             update_settings,
@@ -748,10 +769,14 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building t3boat")
-        .run(|_, event| {
+        .run(|handle, event| match event {
             // A tray app keeps running with its window closed.
-            if let tauri::RunEvent::ExitRequested { api, code: None, .. } = event {
-                api.prevent_exit();
+            tauri::RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
+            tauri::RunEvent::Exit => {
+                if let Ok(app) = handle.state::<Ui>().app() {
+                    tauri::async_runtime::block_on(app.stop_forwards());
+                }
             }
+            _ => {}
         });
 }

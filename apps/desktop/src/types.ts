@@ -95,6 +95,20 @@ export interface MachineDetails {
   createdAt: number; // unix secs
   /** T3 Connect is on: the user's other devices reach it with their T3 account */
   connect: boolean;
+  /** what listened there at the last scan_ports, and the ports forwarded to this computer */
+  ports: PortView[];
+}
+
+export interface PortView {
+  port: number;
+  /** a container's name, else the process's */
+  name: string | null;
+  listening: boolean;
+  /** turned on; kept across sleeps */
+  forwarded: boolean;
+  /** reachable now at localhost:<port> on this computer */
+  live: boolean;
+  error: string | null;
 }
 
 export type SetupAction = "installBoat" | "signInBoat" | "installT3" | "recheck";
@@ -141,6 +155,9 @@ export interface Commands {
   turn_on_connect: [{ id: string }, void]; // resolves once reachable, after the browser sign-in
   latest_thread: [{ id: string }, string | null]; // thread id
   get_machine_details: [{ id: string }, MachineDetails];
+  scan_ports: [{ id: string }, void]; // never wakes it
+  forward_ports: [{ id: string; ports: number[]; on: boolean }, void]; // on wakes it
+  open_port: [{ port: number }, void];
   add_mcp: [{ client: McpClient }, void];
   update_settings: [{ settings: Settings }, void];
   connect_github_uploads: [undefined, void]; // resolves once signed in, after the browser sign-in

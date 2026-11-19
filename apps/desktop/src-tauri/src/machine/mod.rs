@@ -4,6 +4,7 @@
 mod capture;
 mod connect;
 mod link;
+pub mod ports;
 pub mod projects;
 pub mod provision;
 pub mod signin;
@@ -182,6 +183,7 @@ pub struct MachineRuntime {
     /// Its T3 projects as last read, and those t3boat is adding.
     projects: Mutex<Vec<projects::MachineProject>>,
     adding: Mutex<Vec<projects::MachineProject>>,
+    ports: ports::Ports,
 }
 
 impl MachineRuntime {
@@ -206,6 +208,7 @@ impl MachineRuntime {
             wake_failure: Mutex::new(None),
             projects: Mutex::new(Vec::new()),
             adding: Mutex::new(Vec::new()),
+            ports: ports::Ports::default(),
         };
         if let Some(shell) = shell {
             this.set_projects_from(&shell);
@@ -651,6 +654,11 @@ impl MachineRuntime {
     /// Someone used the machine: it stays awake, and recorded answers may be outdated.
     pub fn user_action(self: &Arc<Self>) {
         self.cache.lock().unwrap().bump_epoch();
+        self.used();
+    }
+
+    /// Someone used the machine in a way that changes nothing T3 Code shows: it stays awake.
+    pub fn used(self: &Arc<Self>) {
         if self.power() != Power::Running {
             return;
         }
@@ -923,6 +931,11 @@ impl MachineRuntime {
                 if let Err(e) = self.refresh_power().await {
                     tracing::warn!("boat info {}: {e:#}", self.id());
                 }
+            }
+            // Before a deleted machine's loop ends: its forwards end with it.
+            if self.forwards_to_sync() {
+                let this = self.clone();
+                tokio::spawn(async move { this.sync_forwards().await });
             }
             if self.power() == Power::Missing {
                 return;

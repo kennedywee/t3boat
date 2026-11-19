@@ -6,7 +6,7 @@
 // ?ready=1 (a new machine comes up in T3 Code with its agents signed in and acme on it, as the website shows it)
 import type { Backend } from "./api";
 import { timeLapse } from "./pixel/clock";
-import type { BoatSandbox, CommandArgs, CommandName, LocalProject, MachineDetails, MachineProject, MachineView, Setup, UiState } from "./types";
+import type { BoatSandbox, CommandArgs, CommandName, LocalProject, MachineDetails, MachineProject, MachineView, PortView, Setup, UiState } from "./types";
 
 const params = new URLSearchParams(location.search);
 
@@ -75,6 +75,16 @@ const manyExtra: MachineView[] = [
   machine({ id: "sb_aa03", name: "old-spike", size: "small", state: "missing", detail: "Deleted on Boat", paired: true }),
   machine({ id: "", name: "new-api", size: "default", state: "creating", detail: "Installing T3 server…", paired: false }),
 ];
+
+/** What listens on each machine, and what is forwarded. */
+const mockPorts: Record<string, PortView[]> = {
+  sb_7f2a: [
+    { port: 4000, name: "flowfokus-server", listening: true, forwarded: true, live: true, error: null },
+    { port: 4001, name: "flowfokus-portal", listening: true, forwarded: true, live: true, error: null },
+    { port: 4002, name: "flowfokus-site", listening: true, forwarded: false, live: false, error: null },
+    { port: 54329, name: "flowfokus-db", listening: true, forwarded: false, live: false, error: null },
+  ],
+};
 
 /** Machines with T3 Connect on. */
 const connectOn = new Set(["sb_7f2a"]);
@@ -340,8 +350,28 @@ function create(): MockBackend {
         t3Version: "0.0.21",
         createdAt: Math.floor(Date.now() / 1000) - extra.days * 86400,
         connect: connectOn.has(id),
+        ports: mockPorts[id] ?? [],
       };
     },
+
+    async scan_ports() {
+      await wait(400);
+    },
+
+    async forward_ports({ id, ports, on }) {
+      await wait(700);
+      const known = (mockPorts[id] ??= []);
+      for (const port of ports) {
+        if (on && port === 4002) throw "port 4002 is in use on this computer";
+        const row = known.find((p) => p.port === port);
+        if (row) Object.assign(row, { forwarded: on, live: on });
+        else if (on) known.push({ port, name: null, listening: false, forwarded: true, live: true, error: null });
+      }
+      mockPorts[id] = known.filter((p) => p.listening || p.forwarded).sort((a, b) => a.port - b.port);
+      emit();
+    },
+
+    async open_port() {},
 
     async add_mcp({ client }) {
       if (state.mcp[client] === null) throw "not installed";

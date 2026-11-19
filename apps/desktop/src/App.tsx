@@ -219,6 +219,7 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
           onAddProject={(p) => addProject(selected, p)}
           onDismissDeleteError={() => setDeleteErrors((d) => without(d, machineKey(selected)))}
           onError={detailsError}
+          onFailed={(text) => toast(`${selected.name}: ${text}`)}
           onBack={back}
         />
       ) : view === "new" ? (
