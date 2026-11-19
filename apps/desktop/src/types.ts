@@ -78,10 +78,8 @@ export interface UiState {
   githubUploads: GithubUploads;
 }
 
-/** The user's own GitHub login on machines, used only by `gh` commands that upload a file. */
 export interface GithubUploads {
   connected: boolean;
-  /** the account's login name, when known */
   login: string | null;
   /** while a sign-in waits: the code GitHub's page asks for */
   code: string | null;

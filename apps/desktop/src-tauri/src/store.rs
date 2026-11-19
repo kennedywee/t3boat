@@ -28,8 +28,7 @@ pub struct Machine {
     pub t3_version: String,
     /// `provision::revision()` of the scripts the machine runs.
     pub provision_revision: String,
-    /// `provision::gh_uploads_revision()` of the "GitHub uploads" setup the machine has: which
-    /// token, or that it has none. `None`: provisioned before there was one.
+    /// `provision::gh_uploads_revision()` of what the machine has. `None`: unknown.
     #[serde(default)]
     pub gh_uploads_revision: Option<String>,
     pub environment_id: String,
@@ -65,14 +64,12 @@ pub struct Settings {
     pub fleet_repo: Option<String>,
 }
 
-/// The user's own GitHub login, from "GitHub uploads" in the settings. Machines get the token for
-/// `gh` commands that upload a file, which GitHub refuses the GitHub App token Boat signs them in
-/// with. It acts as the user until they revoke it on GitHub.
+/// The user's own GitHub login, which machines use for `gh` uploads only. The token acts as the
+/// user until they revoke it on GitHub.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GithubUploads {
     pub token: String,
-    /// The account's login name, for the settings to show.
     pub login: Option<String>,
 }
 

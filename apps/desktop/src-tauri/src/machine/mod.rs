@@ -45,7 +45,6 @@ const DUE_WAKE_RETRY: Duration = Duration::from_secs(5 * 60);
 /// A running machine's link is checked this often: links can be turned on, fail or near expiry
 /// while it stays up.
 const LINK_CHECK: Duration = Duration::from_secs(10 * 60);
-/// How long a failed "GitHub uploads" change waits for its next try, from when it failed.
 const GH_UPLOADS_RETRY: Duration = Duration::from_secs(60);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -132,14 +131,12 @@ pub struct Shared {
     pub boat: Boat,
     pub t3: T3Desktop,
     pub settings: RwLock<Settings>,
-    /// The user's own GitHub login for uploads, when connected.
     pub github_uploads: RwLock<Option<GithubUploads>>,
     pub events: mpsc::UnboundedSender<Event>,
     pub http: reqwest::Client,
 }
 
 impl Shared {
-    /// What the settings put on every machine, as of now.
     pub fn extras(&self) -> provision::Extras {
         provision::Extras {
             fleet: self.settings.read().unwrap().fleet_repo.clone(),
@@ -169,12 +166,10 @@ pub struct MachineRuntime {
     watchdog: Mutex<Option<WatchdogStatus>>,
     /// One wake at a time; a delete takes it too, so no restore swaps the sandbox under it.
     pub(crate) waking: tokio::sync::Mutex<()>,
-    /// One change to what the machine runs at a time (an upgrade, "GitHub uploads"). Each reads
-    /// the settings once it holds this, so the last one to run leaves the machine as the settings
-    /// are: a disconnect waits for a connect still going over, then undoes it.
+    /// One change to the machine at a time. Each reads the settings once it holds this, so a
+    /// disconnect that overtakes a connect still wins.
     provisioning: tokio::sync::Mutex<()>,
-    /// The "GitHub uploads" try for the machine's loop: for which settings, and when it failed
-    /// (`None` while it runs). The same settings wait for it, then for `GH_UPLOADS_RETRY`.
+    /// The loop's "GitHub uploads" try: for which settings, and when it failed (`None`: running).
     gh_uploads_try: Mutex<Option<(String, Option<Instant>)>>,
     /// One capture at a time: "sleep now" and the background poll can see the same drain.
     capturing: tokio::sync::Mutex<()>,
@@ -557,32 +552,27 @@ impl MachineRuntime {
         Ok(())
     }
 
-    /// Leaves the running machine with the "GitHub uploads" token of the settings, or without one.
-    /// Restarts nothing, so it is safe while agents work. The machine's loop calls this whenever
-    /// what the machine was last given differs from the settings, and again after a failure.
+    /// Leaves the running machine with the settings' upload token, or without one.
     async fn bring_gh_uploads(&self) -> Result<()> {
         let (boat, id) = (&self.shared.boat, self.sandbox_id());
-        // The package install first and outside the lock: it can take minutes, and a disconnect
-        // must not wait behind it. It holds no token; whether it worked, the next part tells.
+        // Outside the lock: apt can take minutes, and a disconnect must not wait behind it.
         if self.shared.extras().gh_upload_token.is_some() {
             let _ = provision::gh_uploads(boat, &id, "upgrade", &provision::Extras::default()).await;
         }
         let _one = self.provisioning.lock().await;
-        // Read under the lock: the settings as they are now, not as when this was asked for.
         let extras = self.shared.extras();
         let revision = provision::gh_uploads_revision(&extras);
         if self.record().gh_uploads_revision.as_deref() == Some(&revision) {
             return Ok(());
         }
-        // Unknown until it has run through: one that fails part way may have changed the token.
+        // A run that fails part way may have changed the token already.
         self.update_record(|m| m.gh_uploads_revision = None);
         provision::gh_uploads(boat, &id, "apply", &extras).await?;
         self.update_record(|m| m.gh_uploads_revision = Some(revision));
         Ok(())
     }
 
-    /// Keeps the machine on the desktop app's T3 version, this app's scripts and what the settings
-    /// put on machines (the fleet repo, the GitHub uploads token).
+    /// Keeps the machine on the desktop app's T3 version, this app's scripts and the fleet setting.
     pub async fn upgrade_if_needed(&self) -> Result<()> {
         let _one = self.provisioning.lock().await;
         let desktop = self.shared.t3.version().await?;
@@ -594,9 +584,7 @@ impl MachineRuntime {
             return Ok(());
         }
         tracing::info!("upgrading {} (T3 {desktop}, scripts {revision})", self.id());
-        // Provisioning changes the "GitHub uploads" setup too, may fail at a later step and does
-        // not say whether that part worked: what the machine holds is unknown from here, and the
-        // machine's loop brings it over again by itself, which does say.
+        // provision.sh runs gh-uploads.sh but does not say whether it worked: the loop finds out.
         self.update_record(|m| m.gh_uploads_revision = None);
         provision::run(
             &self.shared.boat,
@@ -976,10 +964,8 @@ impl MachineRuntime {
                         }
                     });
                 }
-                // "GitHub uploads" as the settings have it now: after a connect or disconnect, on a
-                // machine that woke or was created with other settings, and after a failed try.
-                // Only the same settings wait, for their try to end and then to be tried again; a
-                // newer change goes at once, and so does a wake.
+                // The same settings wait for their try to end, then to be retried; a newer change
+                // or a wake goes at once.
                 let gh_uploads = provision::gh_uploads_revision(&self.shared.extras());
                 let start = {
                     let mut last = self.gh_uploads_try.lock().unwrap();
@@ -1003,7 +989,6 @@ impl MachineRuntime {
                             tracing::warn!("bringing GitHub uploads to {}: {e:#}", this.id());
                         }
                         let mut last = this.gh_uploads_try.lock().unwrap();
-                        // A newer change's try has taken the slot meanwhile: it is not this one's.
                         if last.as_ref().is_some_and(|(revision, _)| *revision == gh_uploads) {
                             *last = result.is_err().then(|| (gh_uploads, Some(Instant::now())));
                         }

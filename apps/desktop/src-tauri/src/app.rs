@@ -303,12 +303,11 @@ impl App {
         self.shared.persist();
     }
 
-    /// The GitHub login connected for uploads: `None` when not connected, else its login name if known.
+    /// `None`: not connected. `Some(None)`: connected, login name unknown.
     pub fn github_uploads(&self) -> Option<Option<String>> {
         self.shared.github_uploads.read().unwrap().as_ref().map(|g| g.login.clone())
     }
 
-    /// The user signs in to GitHub in the browser; `on_code` gets the code its page asks for.
     pub async fn connect_github_uploads(self: &Arc<Self>, on_code: impl FnOnce(&str)) -> Result<()> {
         let scratch = self.data_dir.join(format!("gh-sign-in-{}", crate::proxy::auth::random_token()));
         let uploads = crate::github::sign_in(&scratch, on_code).await?;
@@ -316,8 +315,7 @@ impl App {
         Ok(())
     }
 
-    /// Connects or (`None`) disconnects the GitHub login machines upload with. Each machine's
-    /// loop brings the change over: within seconds where it runs, else as it next wakes.
+    /// Each machine's loop brings the change over.
     pub fn set_github_uploads(&self, uploads: Option<GithubUploads>) {
         *self.shared.github_uploads.write().unwrap() = uploads;
         self.shared.persist();

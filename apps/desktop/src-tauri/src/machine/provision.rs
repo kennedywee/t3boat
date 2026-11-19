@@ -14,18 +14,16 @@ const GH_UPLOADS_SH: &str = include_str!("gh-uploads.sh");
 const T3_PORT: u16 = 3773;
 const WATCHDOG_PORT: u16 = 3774;
 
-/// What the user's settings put on every machine.
+/// What the settings put on every machine.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Extras {
-    /// The fleet repo (`owner/name`) machines clone and install.
     pub fleet: Option<String>,
-    /// The user's own GitHub token, which `gh` on a machine uses for uploads only.
     pub gh_upload_token: Option<String>,
 }
 
 /// Identifies the provisioning scripts and the fleet repo; a machine provisioned with others gets
-/// them on wake, so a changed fleet setting reaches every machine. Not "GitHub uploads": that has
-/// `gh_uploads_revision`, so a new token never asks for an upgrade, which may restart T3.
+/// them on wake, so a changed fleet setting reaches every machine. The upload token is not part
+/// of it: a new one must not ask for an upgrade, which may restart T3.
 pub fn revision(extras: &Extras) -> String {
     let hash = fnv1a(
         PROVISION_SH
@@ -37,9 +35,7 @@ pub fn revision(extras: &Extras) -> String {
     format!("{hash:016x}")
 }
 
-/// Identifies the "GitHub uploads" setup `gh-uploads.sh` leaves on a machine: its script and the
-/// token, or that there is none. Kept per machine, apart from `revision`, because this part goes
-/// to a machine at once, agents working or not, where the rest of an upgrade waits for a wake.
+/// Identifies what `gh-uploads.sh` leaves on a machine: the script and the token, or none.
 pub fn gh_uploads_revision(extras: &Extras) -> String {
     let token = extras.gh_upload_token.as_deref().unwrap_or_default();
     format!("{:016x}", fnv1a(GH_UPLOADS_SH.bytes().chain([0]).chain(token.bytes())))
@@ -131,7 +127,6 @@ pub async fn run(
         mint = u8::from(mint_upstream_token),
         name = shell_word(name)?,
         fleet = fleet_word(extras.fleet.as_deref())?,
-        // In the uploaded file, not in the command Boat runs: `boat history` keeps commands.
         gh = shell_word(extras.gh_upload_token.as_deref().unwrap_or_default())?,
     );
     let out = run_uploaded(boat, sandbox_id, &script, 600).await?;
@@ -143,8 +138,8 @@ pub async fn run(
     Ok(serde_json::from_str(line)?)
 }
 
-/// Runs `script` on the sandbox from an uploaded file, which the script itself removes: what it
-/// holds (a token) is then never on a command line, and `boat history` keeps those. Returns stdout.
+/// Runs `script` from an uploaded file that removes itself: a token in it never reaches a command
+/// line, which `boat history` keeps. Returns stdout.
 async fn run_uploaded(boat: &Boat, sandbox_id: &str, script: &str, timeout_secs: u64) -> Result<String> {
     let name = format!("t3boat-provision-{}.sh", random_token());
     let local = std::env::temp_dir().join(&name);
@@ -156,9 +151,7 @@ async fn run_uploaded(boat: &Boat, sandbox_id: &str, script: &str, timeout_secs:
     boat.exec_ok(sandbox_id, &format!("bash {remote}"), timeout_secs).await
 }
 
-/// Runs one part of `gh-uploads.sh` on a running machine. `upgrade`: the newer `gh`, which takes
-/// no token. `apply`: the wrapper and the token of `extras`, or the token's removal. Unlike `run`
-/// it restarts nothing, so it is safe while agents work.
+/// Runs one part of `gh-uploads.sh` (`upgrade` or `apply`) on a running machine.
 pub async fn gh_uploads(boat: &Boat, sandbox_id: &str, part: &str, extras: &Extras) -> Result<()> {
     let script = format!(
         "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
@@ -224,7 +217,6 @@ pub async fn create(
         local_port,
         t3_version: t3_version.to_owned(),
         provision_revision: revision(extras),
-        // The machine's loop brings "GitHub uploads" over by itself and learns whether it worked.
         gh_uploads_revision: None,
         environment_id: provisioned.environment_id,
         client_tokens: Vec::new(),

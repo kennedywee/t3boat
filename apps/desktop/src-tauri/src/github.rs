@@ -1,8 +1,6 @@
-//! "GitHub uploads": the user's own GitHub login, for the one thing machines cannot do with the
-//! login Boat gives them. Boat signs `gh` in with its GitHub App's token, and GitHub's upload
-//! server refuses those, so `gh pr edit --attach shot.png` fails there. The sign-in runs here
-//! with this computer's `gh`, in a config folder of its own: the user's own `gh` login is neither
-//! read nor changed.
+//! "GitHub uploads": the user's own GitHub login, which machines need for `gh … --attach`
+//! (GitHub's upload server refuses the GitHub App token Boat gives them). The sign-in runs this
+//! computer's `gh` in a config folder of its own, so the user's own `gh` login is not touched.
 
 use crate::process::command;
 use crate::store::GithubUploads;
@@ -12,12 +10,11 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-/// Where GitHub asks for the code of a device sign-in.
 const DEVICE_PAGE: &str = "https://github.com/login/device";
 /// GitHub's device codes last 15 minutes.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(900);
 
-/// `gh` with nothing of the user's: no token from the environment, its config in `config_dir`.
+/// `gh` with nothing of the user's: no token from the environment, its own config folder.
 fn gh(bin: &Path, config_dir: &Path) -> tokio::process::Command {
     let mut cmd = command(bin);
     cmd.env("GH_CONFIG_DIR", config_dir)
@@ -31,9 +28,7 @@ fn gh(bin: &Path, config_dir: &Path) -> tokio::process::Command {
     cmd
 }
 
-/// Signs in to GitHub in the browser and returns the login. `scratch` is a folder that does not
-/// exist yet; it is removed again. `on_code` gets the code GitHub's page asks for, before the
-/// page opens.
+/// `scratch` must not exist yet; it is removed again.
 pub async fn sign_in(scratch: &Path, on_code: impl FnOnce(&str)) -> Result<GithubUploads> {
     let bin = which::which("gh").map_err(|_| {
         anyhow!("GitHub's gh is not installed on this computer; the sign-in needs it: https://cli.github.com")
@@ -47,8 +42,7 @@ pub async fn sign_in(scratch: &Path, on_code: impl FnOnce(&str)) -> Result<Githu
 }
 
 async fn sign_in_with(bin: &Path, config_dir: &Path, on_code: impl FnOnce(&str)) -> Result<GithubUploads> {
-    // `--insecure-storage`: into the config folder, never the system keyring, where it would
-    // replace the user's own gh login.
+    // `--insecure-storage`: the system keyring would replace the user's own gh login.
     let mut login = gh(bin, config_dir)
         .args(["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"])
         .args(["--skip-ssh-key", "--insecure-storage"])
@@ -101,7 +95,7 @@ async fn output(cmd: &mut tokio::process::Command) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-/// The device code in a line of gh's output: `XXXX-XXXX`.
+/// `XXXX-XXXX` in a line of gh's output.
 fn device_code(line: &str) -> Option<&str> {
     let part = |s: &str| s.len() == 4 && s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
     line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))

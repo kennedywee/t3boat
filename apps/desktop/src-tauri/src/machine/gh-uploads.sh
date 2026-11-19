@@ -1,28 +1,20 @@
 #!/usr/bin/env bash
-# Runs on a Boat sandbox, as `user`: by provision.sh, and by itself when "GitHub uploads" changes
-# in t3boat's settings, since it touches nothing T3 or an agent's turn depends on. Idempotent.
+# Runs on a Boat sandbox, as `user`. Idempotent, and restarts nothing: safe while agents work.
 #   [T3BOAT_GH_UPLOAD_TOKEN=<token>] gh-uploads.sh [all|upgrade|apply]
-# `upgrade` is the slow part alone (apt) and `apply` the rest (the wrapper and the token): t3boat
-# runs them apart, so a disconnect never waits for a package install.
+# `upgrade` is apt alone, `apply` the wrapper and the token: a disconnect runs only `apply`.
 set -euo pipefail
 mode="${1:-all}"
 boat_dir="$HOME/.t3boat"
 mkdir -p "$boat_dir"
 chmod 700 "$boat_dir"
 
-# A disconnect takes the token off before anything below can fail, and with it what a connect that
-# failed half way left behind.
+# First, before anything below can fail.
 if [ "$mode" != upgrade ]; then
   rm -f "$boat_dir/gh-upload-token.new"
   [ -n "${T3BOAT_GH_UPLOAD_TOKEN:-}" ] || rm -f "$boat_dir/gh-upload-token"
 fi
 
-# GitHub uploads. Boat signs `gh` in with its GitHub App's token, which GitHub's upload server
-# turns away, so `gh pr edit --attach shot.png` fails. With "GitHub uploads" connected in t3boat's
-# settings the machine holds a second token, the user's own, and a `gh` ahead of Boat's on PATH
-# uses it for the commands that upload and for nothing else.
-# First the newest `gh` from GitHub's apt repo, which Boat's image already has: the image's own
-# predates `--attach`. Only that repo is refreshed. A failed upgrade costs uploads, not the machine.
+# The image's gh predates `--attach`. Only GitHub's apt repo is refreshed.
 gh_list=/etc/apt/sources.list.d/github-cli.list
 if [ "$mode" != apply ] && [ -f "$gh_list" ]; then
   if ! { sudo timeout 120 apt-get update -qq -o Dir::Etc::sourcelist="$gh_list" -o Dir::Etc::sourceparts=- \
@@ -33,27 +25,23 @@ if [ "$mode" != apply ] && [ -f "$gh_list" ]; then
   fi
 fi
 [ "$mode" != upgrade ] || exit 0
-# This runs while agents work, so each file is written whole under another name and renamed into
-# place: a `gh` started meanwhile reads the old file or the new one, never half of one.
+# Written whole, then renamed: a gh started meanwhile never reads half a file.
 mkdir -p "$HOME/.local/bin"
 cat >"$HOME/.local/bin/gh.t3boat-new" <<'WRAPPER'
 #!/usr/bin/env bash
-# t3boat: runs Boat's gh. A command that uploads a file (--attach) runs with the user's own GitHub
-# token from "GitHub uploads" in t3boat's settings, since GitHub's upload server turns away the
-# GitHub App token gh has here. Everything else runs exactly as without this file.
+# t3boat: Boat's gh, with the user's own GitHub token for commands that upload a file (--attach).
+# GitHub's upload server refuses the GitHub App token gh has here.
 real=/usr/bin/gh
 token_file="$HOME/.t3boat/gh-upload-token"
 
-# Whether the command uploads a file: one of the commands that have --attach, with --attach given
-# as a flag. An `--attach` that is another flag's value (--body '--attach') is text, not an upload.
 uploads() {
-  # The command is the first two words that are not flags: `gh pr -R owner/repo edit 7` is `pr edit`.
+  # `gh pr -R owner/repo edit 7` is `pr edit`.
   local command="" words=0 attach=1
   while [ $# -gt 0 ]; do
     case "$1" in
       --) break ;;
       --attach | --attach=*) attach=0 ;;
-      # These commands' flags that take a value: the next argument is not a flag.
+      # Flags that take a value: `--body '--attach'` is text, not an upload.
       -a | -b | -B | -F | -H | -l | -m | -p | -r | -R | -t | -T) shift ;;
       --assignee | --base | --blocked-by | --blocking | --body | --body-file | --head | --label) shift ;;
       --milestone | --parent | --project | --recover | --repo | --reviewer | --template | --title | --type) shift ;;
@@ -91,7 +79,7 @@ mv -f "$HOME/.local/bin/gh.t3boat-new" "$HOME/.local/bin/gh"
 if [ -n "${T3BOAT_GH_UPLOAD_TOKEN:-}" ]; then
   (umask 077 && printf '%s' "$T3BOAT_GH_UPLOAD_TOKEN" >"$boat_dir/gh-upload-token.new")
   mv -f "$boat_dir/gh-upload-token.new" "$boat_dir/gh-upload-token"
-  # Connected, yet this gh cannot upload (the upgrade above failed): t3boat tries again.
+  # A failure gets this tried again.
   if ! /usr/bin/gh pr edit --help 2>/dev/null | grep -q -- --attach; then
     echo "gh on this machine has no --attach yet" >&2
     exit 3
