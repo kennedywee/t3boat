@@ -26,6 +26,9 @@ pub struct Machine {
     pub local_port: u16,
     /// T3 server version installed on the machine.
     pub t3_version: String,
+    /// Another computer's t3boat installed that version, not this one.
+    #[serde(default)]
+    pub t3_set_elsewhere: bool,
     /// `provision::revision()` of the scripts the machine runs.
     pub provision_revision: String,
     /// `provision::gh_uploads_revision()` of what the machine has. `None`: unknown.

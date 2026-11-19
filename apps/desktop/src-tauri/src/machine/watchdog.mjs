@@ -7,7 +7,8 @@
 //
 // Then it "drains": it publishes a manifest of the final orchestration state so the laptop
 // proxy can keep answering T3 Code truthfully while the machine sleeps. The proxy captures it
-// and acks; without an ack (laptop gone) the watchdog stops after a grace period.
+// and acks; without an ack (laptop gone) the watchdog stops after a grace period. Several
+// computers can run t3boat for one machine: the stop waits a moment for each to capture.
 
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -103,6 +104,13 @@ function sampleCpu() {
 }
 let manifest = null;
 let drainStartedAt = 0;
+// The t3boat apps connected lately, by the id each sends, and those that acked this drain.
+const CLIENT_SEEN_MS = 15_000;
+const OTHERS_WAIT_MS = 10_000;
+const clients = new Map();
+let acks = new Set();
+const othersCapturing = () =>
+  [...clients].some(([id, seenAt]) => Date.now() - seenAt < CLIENT_SEEN_MS && !acks.has(id));
 /** Counts the saves begun: one called off and begun again must not finish for the later one. */
 let saves = 0;
 let lastTickAt = Date.now();
@@ -270,6 +278,7 @@ function drain() {
     manifest = null;
   }
   phase = "draining";
+  acks = new Set();
   drainStartedAt = Date.now();
   log("draining", manifest?.sequence);
 }
@@ -364,6 +373,8 @@ function status() {
     keepAwakeSecs: Number.isFinite(keepAwakeUntil) ? Math.max(0, Math.ceil((keepAwakeUntil - Date.now()) / 1000)) : 0,
     idleSecs: Math.floor((Date.now() - lastActivityAt) / 1000),
     sleepAfterSecs: config.sleepAfterSecs,
+    // Another computer's t3boat may have changed it.
+    t3Version: config.t3Version ?? null,
     nextDueAt,
     workDue: dueSoon(),
     // While stopping, it names the sequence the machine stops at: the proxy trusts its
@@ -390,6 +401,8 @@ const server = createServer(async (req, res) => {
     res.end(value === undefined ? "" : JSON.stringify(value));
   };
   if (req.headers.authorization !== `Bearer ${config.secret}`) return reply(401, { error: "unauthorized" });
+  const client = req.headers["x-t3boat-client"];
+  if (client) clients.set(client, Date.now());
   try {
     if (req.method === "GET" && req.url === "/status") return reply(200, status());
     if (req.method === "GET" && req.url === "/status?fresh") {
@@ -440,6 +453,10 @@ const server = createServer(async (req, res) => {
       // The proxy captured this state: no need to wait out the grace period.
       const { sequence } = JSON.parse((await readBody(req)) || "{}");
       const acked = () => phase === "draining" && manifest && sequence === manifest.sequence;
+      if (!acked()) return reply(200, status());
+      if (client) acks.add(client);
+      const waitUntil = Date.now() + OTHERS_WAIT_MS;
+      while (acked() && othersCapturing() && Date.now() < waitUntil) await new Promise((r) => setTimeout(r, 250));
       if (!acked()) return reply(200, status());
       // A run started since the last tick (an automation, not via the proxy) shows only here.
       await refreshWorking();

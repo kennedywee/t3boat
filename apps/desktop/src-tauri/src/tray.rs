@@ -459,6 +459,12 @@ async fn set_sandbox_running(ui: State<'_, Ui>, id: String, running: bool) -> Re
     ui.app()?.set_other_sandbox_running(&id, running).await.map_err(err)
 }
 
+/// Adds one of `other_sandboxes` marked `adoptable`: a machine another computer created.
+#[tauri::command]
+async fn adopt_machine(ui: State<'_, Ui>, id: String) -> Res {
+    ui.app()?.adopt_machine(&id).await.map(drop).map_err(err)
+}
+
 #[tauri::command]
 async fn wake_machine(ui: State<'_, Ui>, id: String) -> Res {
     ui.app()?.machine(&id).map_err(err)?.ensure_awake().await.map_err(err)
@@ -691,6 +697,7 @@ pub fn run() {
             add_project,
             other_sandboxes,
             set_sandbox_running,
+            adopt_machine,
             omarchy_theme,
             wake_machine,
             sleep_machine,

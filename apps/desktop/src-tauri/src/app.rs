@@ -1,7 +1,7 @@
 //! The app's model: machines, settings, setup checks. UI-agnostic; the tray and the dev CLI
 //! both drive it.
 
-use crate::boat::{Boat, Starts};
+use crate::boat::{Boat, Resume, Starts};
 use crate::machine::{provision, Event, MachineRuntime, Power, Shared, WatchdogPhase};
 use crate::proxy;
 use crate::store::{GithubUploads, Settings, Spend, State, Store};
@@ -170,6 +170,7 @@ impl App {
                 // Boat answers an unrouted port with a redirect to its fallback page.
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
+            client: proxy::auth::random_token(),
         });
         let app = Arc::new(Self {
             shared,
@@ -262,6 +263,9 @@ impl App {
     pub async fn other_sandboxes(&self) -> Result<Vec<crate::boat::SandboxSummary>> {
         let mut all = self.shared.boat.summaries().await?;
         all.retain(|s| !self.owns_sandbox(&s.id));
+        for s in &mut all {
+            s.adoptable = s.name.as_deref().and_then(provision::machine_name).is_some_and(valid_name);
+        }
         Ok(all)
     }
 
@@ -418,6 +422,82 @@ impl App {
             }
         });
         // The machine exists either way; its row still offers "Add to T3 Code".
+        if let Err(e) = self.pair(&machine) {
+            self.shared.notify(format!("Couldn't open T3 Code for {name}"), format!("{e:#}; use Add to T3 Code"));
+        }
+        Ok(machine)
+    }
+
+    /// Adds a machine that t3boat on another computer created: one of `other_sandboxes` marked
+    /// `adoptable`. Wakes it if it sleeps, to read what it says of itself. The machine gets a T3
+    /// token for this computer and is otherwise left as it is, so both computers use it.
+    pub async fn adopt_machine(self: &Arc<Self>, sandbox_id: &str) -> Result<Arc<MachineRuntime>> {
+        let boat = &self.shared.boat;
+        let sandbox = self
+            .other_sandboxes()
+            .await?
+            .into_iter()
+            .find(|s| s.id == sandbox_id && s.adoptable)
+            .ok_or_else(|| anyhow!("{sandbox_id} is not a t3boat machine from another computer"))?;
+        let name = sandbox.name.as_deref().and_then(provision::machine_name).unwrap_or_default().to_owned();
+        let port = self.reserve(&name)?;
+        self.shared.changed();
+        let result = async {
+            let size = sandbox.size.clone().unwrap_or_else(|| "default".to_owned());
+            let resumed = match sandbox.state.as_str() {
+                "stopped" => {
+                    self.set_creating_step(&name, "Waking the machine");
+                    if boat.resume(sandbox_id, &size).await? == Resume::DataExpired {
+                        bail!("Boat deleted its disk after 14 days asleep; wake it on the computer that created it, which restores it");
+                    }
+                    true
+                }
+                "stopping" => bail!("{name} is going to sleep; try again in a moment"),
+                _ => false,
+            };
+            self.set_creating_step(&name, "Reading the machine");
+            let adopted = provision::adopt(boat, sandbox_id).await?;
+            let id = provision::adopted_id(&adopted, &name, sandbox_id)?;
+            if let Some(m) = self.machines().iter().find(|m| m.id() == id) {
+                bail!("already on this computer as {}", m.record().name);
+            }
+            let (upstream_url, watchdog_url) = provision::host(boat, sandbox_id).await?;
+            let machine = self.runtime(crate::store::Machine {
+                id,
+                sandbox_id: sandbox_id.to_owned(),
+                name: name.clone(),
+                size,
+                upstream_url,
+                upstream_token: adopted.upstream_token,
+                watchdog_url,
+                watchdog_secret: adopted.watchdog_secret,
+                local_port: port,
+                t3_version: adopted.t3_version,
+                t3_set_elsewhere: true,
+                provision_revision: adopted.revision.unwrap_or_default(),
+                gh_uploads_revision: None,
+                environment_id: adopted.environment_id,
+                client_tokens: Vec::new(),
+                link_tokens: Vec::new(),
+                created_at: sandbox.created_at.map_or_else(|| chrono::Utc::now().timestamp(), |t| t.timestamp()),
+                next_due_at: None,
+                connect: false,
+                forwards: Vec::new(),
+                links: Vec::new(),
+            });
+            // The watchdog was frozen mid-stop: told of the resume, it counts the idle time anew.
+            machine.send_activity(resumed).await;
+            if let Err(e) = machine.prime().await {
+                tracing::warn!("priming {}: {e:#}", machine.id());
+            }
+            self.spawn(machine.clone());
+            Ok::<_, anyhow::Error>(machine)
+        }
+        .await;
+        self.creating.lock().unwrap().retain(|c| c.name != name);
+        self.shared.persist();
+        self.shared.changed();
+        let machine = result?;
         if let Err(e) = self.pair(&machine) {
             self.shared.notify(format!("Couldn't open T3 Code for {name}"), format!("{e:#}; use Add to T3 Code"));
         }

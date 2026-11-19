@@ -29,8 +29,9 @@ interface Props {
 }
 
 /**
- * The Boat account's sandboxes that t3boat did not create (made with the Boat CLI or website).
- * t3boat cannot manage them, only start and stop them. Hidden when there are none.
+ * The Boat account's sandboxes that are not machines on this computer. One made with the Boat
+ * CLI or website can only be started and stopped. A t3boat machine that another computer
+ * created can be added here. Hidden when there are none.
  */
 export function OtherSandboxes({ onError }: Props) {
   const [list, setList] = useState<BoatSandbox[]>([]);
@@ -58,6 +59,16 @@ export function OtherSandboxes({ onError }: Props) {
       });
   };
 
+  const adopt = (s: BoatSandbox) => {
+    setBusy((b) => ({ ...b, [s.id]: true }));
+    call("adopt_machine", { id: s.id })
+      .catch((e) => onError(errorText(e)))
+      .finally(() => {
+        setBusy((b) => ({ ...b, [s.id]: false }));
+        load();
+      });
+  };
+
   if (list.length === 0) return null;
 
   return (
@@ -66,7 +77,7 @@ export function OtherSandboxes({ onError }: Props) {
         <span className="caption">
           other boat sandboxes <span className="count">{list.length}</span>
         </span>
-        <span className="caption others-note">not managed by t3boat</span>
+        <span className="caption others-note">not on this computer</span>
       </div>
       <ul className="list others-list">
         {list.map((s) => {
@@ -80,13 +91,19 @@ export function OtherSandboxes({ onError }: Props) {
                   <span className="chip">{s.state}</span>
                 </div>
                 <div className="row-detail">
-                  {s.id}
+                  {s.adoptable ? "t3boat machine from another computer" : s.id}
                   {sizeText(s) ? ` · ${sizeText(s)}` : ""}
                 </div>
               </div>
-              <button className="btn btn-sm" disabled={busy[s.id]} onClick={() => toggle(s)}>
-                {busy[s.id] ? <Dots /> : on ? "Stop" : "Start"}
-              </button>
+              {s.adoptable ? (
+                <button className="btn btn-sm" disabled={busy[s.id]} onClick={() => adopt(s)}>
+                  {busy[s.id] ? <Dots /> : "Add here"}
+                </button>
+              ) : (
+                <button className="btn btn-sm" disabled={busy[s.id]} onClick={() => toggle(s)}>
+                  {busy[s.id] ? <Dots /> : on ? "Stop" : "Start"}
+                </button>
+              )}
             </li>
           );
         })}

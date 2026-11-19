@@ -2,7 +2,8 @@
 //! Reads commands from stdin: list | create <name> [size] | pair <id> | wake <id> | sleep <id> |
 //! keep <id> [minutes] (keep awake; none: until stopped, 0 ends it) | connect <id> | delete <id> | costs |
 //! ports <id> (scan and list) | forward <id> <port>... | unforward <id> <port>... |
-//! link <id> <port> | unlink <id> <port>
+//! link <id> <port> | unlink <id> <port> | others (sandboxes not on this computer) |
+//! adopt <sandbox-id> (a machine another computer created)
 
 use std::sync::Arc;
 use t3boat_lib::app::{self, App, Setup};
@@ -59,6 +60,15 @@ async fn command(app: &Arc<App>, words: &[String]) -> anyhow::Result<()> {
             let size = words.get(2).cloned().unwrap_or_else(|| "small".into());
             let m = app.create_machine(&arg(1), &size, Vec::new()).await?;
             println!("CREATED {} on port {}", m.id(), m.record().local_port);
+        }
+        Some("others") => {
+            for s in app.other_sandboxes().await? {
+                println!("{} {:?} [{}] adoptable={}", s.id, s.name, s.state, s.adoptable);
+            }
+        }
+        Some("adopt") => {
+            let m = app.adopt_machine(&arg(1)).await?;
+            println!("ADOPTED {} on port {}", m.id(), m.record().local_port);
         }
         Some("pair") => app.pair(&*app.machine(&arg(1))?)?,
         Some("upgrade") => app.machine(&arg(1))?.upgrade_if_needed().await?,
