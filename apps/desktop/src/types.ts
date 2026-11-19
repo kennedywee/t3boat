@@ -109,6 +109,8 @@ export interface PortView {
   /** reachable now at localhost:<port> on this computer */
   live: boolean;
   error: string | null;
+  /** its Boat link, access token included: an HTTPS address for any device */
+  link: string | null;
 }
 
 export type SetupAction = "installBoat" | "signInBoat" | "installT3" | "recheck";
@@ -157,7 +159,8 @@ export interface Commands {
   get_machine_details: [{ id: string }, MachineDetails];
   scan_ports: [{ id: string }, void]; // never wakes it
   forward_ports: [{ id: string; ports: number[]; on: boolean }, void]; // on wakes it
-  open_port: [{ port: number }, void];
+  link_port: [{ id: string; port: number; on: boolean }, string | null]; // the link; wakes it
+  open_port: [{ id: string; port: number; link: boolean }, void]; // its link, else its forward
   add_mcp: [{ client: McpClient }, void];
   update_settings: [{ settings: Settings }, void];
   connect_github_uploads: [undefined, void]; // resolves once signed in, after the browser sign-in

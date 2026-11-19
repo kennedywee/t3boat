@@ -3,8 +3,12 @@
 //! code works unchanged. The listener is t3boat's and relays to a `boat forward` behind it: that
 //! way a connection counts as using the machine, and a port taken here is told apart from a
 //! tunnel that failed.
+//!
+//! A port can also get a link: Boat's own HTTPS address for it, which opens on any device and
+//! needs nothing running here. The app then runs under another host name, which it must accept.
 
 use super::{provision, MachineRuntime, Power};
+use crate::store::PortLink;
 use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -26,12 +30,20 @@ const SYSTEM: &[&str] =
 
 #[derive(Default)]
 pub struct Ports {
-    /// As last scanned: port and what listens there.
-    listening: Mutex<BTreeMap<u16, Option<String>>>,
+    /// As last scanned, by port.
+    listening: Mutex<BTreeMap<u16, Listening>>,
     forwards: Mutex<HashMap<u16, Forward>>,
     /// Why a wanted port is not forwarded.
     errors: Mutex<HashMap<u16, String>>,
     syncing: tokio::sync::Mutex<()>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Listening {
+    /// A container's name, else the process's.
+    name: Option<String>,
+    /// On loopback only: Boat reaches it through a relay.
+    loopback: bool,
 }
 
 /// The listener, its tunnel and its open connections: all end with the task.
@@ -56,26 +68,31 @@ pub struct PortView {
     /// Reachable now at `localhost:<port>` on this computer.
     pub live: bool,
     pub error: Option<String>,
+    /// Its Boat link, token included.
+    pub link: Option<String>,
 }
 
 impl MachineRuntime {
     pub fn port_views(&self) -> Vec<PortView> {
-        let wanted = self.record().forwards;
+        let record = self.record();
+        let (wanted, links) = (record.forwards, record.links);
         let listening = self.ports.listening.lock().unwrap().clone();
         let forwards = self.ports.forwards.lock().unwrap();
         let errors = self.ports.errors.lock().unwrap();
-        let mut ports: Vec<u16> = listening.keys().copied().chain(wanted.iter().copied()).collect();
+        let mut ports: Vec<u16> =
+            listening.keys().copied().chain(wanted.iter().copied()).chain(links.iter().map(|l| l.port)).collect();
         ports.sort_unstable();
         ports.dedup();
         ports
             .into_iter()
             .map(|port| PortView {
                 port,
-                name: listening.get(&port).cloned().flatten(),
+                name: listening.get(&port).and_then(|l| l.name.clone()),
                 listening: listening.contains_key(&port),
                 forwarded: wanted.contains(&port),
                 live: forwards.get(&port).is_some_and(|f| !f.0.is_finished()),
                 error: errors.get(&port).cloned(),
+                link: links.iter().find(|l| l.port == port).map(|l| l.url.clone()),
             })
             .collect()
     }
@@ -124,6 +141,33 @@ impl MachineRuntime {
         self.update_record(|m| m.forwards.retain(|p| !ports.contains(p) || self.forward_live(*p)));
         self.sync_forwards().await;
         bail!("{}", failed.join("; "))
+    }
+
+    /// Gives `port` a Boat link and returns it, or takes the link away. Wakes a sleeping
+    /// machine: Boat changes a link only on a running one. Taking it away keeps its token, so
+    /// a later link is the same address.
+    pub async fn set_link(&self, port: u16, on: bool) -> Result<Option<String>> {
+        self.ensure_awake().await?;
+        let (boat, id) = (&self.shared.boat, self.sandbox_id());
+        if !on {
+            boat.exec_ok(&id, &format!("host hide {port}"), 30).await?;
+            self.update_record(|m| m.links.retain(|l| l.port != port));
+            return Ok(None);
+        }
+        if provision::own_port(port) {
+            bail!("port {port} is t3boat's own");
+        }
+        // How it listens decides how Boat reaches it, and that can have changed.
+        self.scan_ports().await?;
+        let Some(loopback) = self.ports.listening.lock().unwrap().get(&port).map(|l| l.loopback) else {
+            bail!("nothing listens on port {port} of the machine yet");
+        };
+        let url = boat.host_private(&id, port, loopback).await?;
+        self.update_record(|m| {
+            m.links.retain(|l| l.port != port);
+            m.links.push(PortLink { port, url: url.clone() });
+        });
+        Ok(Some(url))
     }
 
     /// Ends every tunnel now, for when the app quits: its tasks are not dropped then.
@@ -211,7 +255,7 @@ impl MachineRuntime {
 }
 
 /// Ports worth showing from `SCAN`'s output: unprivileged, not T3's own, not the image's.
-fn parse_scan(out: &str) -> BTreeMap<u16, Option<String>> {
+fn parse_scan(out: &str) -> BTreeMap<u16, Listening> {
     let (sockets, containers) = out.split_once("---").unwrap_or((out, ""));
     let mut published = HashMap::new();
     for line in containers.lines() {
@@ -224,16 +268,19 @@ fn parse_scan(out: &str) -> BTreeMap<u16, Option<String>> {
             }
         }
     }
-    let mut found = BTreeMap::new();
+    let mut found: BTreeMap<u16, Listening> = BTreeMap::new();
     for line in sockets.lines() {
-        let mut fields = line.split_whitespace();
-        let Some(port) = fields.nth(3).and_then(port_of) else { continue };
+        let Some(address) = line.split_whitespace().nth(3) else { continue };
+        let Some(port) = port_of(address) else { continue };
         let process = line.split_once("users:((\"").and_then(|(_, rest)| rest.split('"').next());
         if port < 1024 || provision::own_port(port) || process.is_some_and(|p| SYSTEM.contains(&p)) {
             continue;
         }
         let name = published.get(&port).cloned().or_else(|| process.map(str::to_owned));
-        found.entry(port).or_insert(name);
+        let loopback = address.starts_with("127.") || address.starts_with("[::1]");
+        // A port can listen on several addresses: one that is not loopback decides.
+        let entry = found.entry(port).or_insert(Listening { name, loopback });
+        entry.loopback &= loopback;
     }
     found
 }
@@ -270,15 +317,16 @@ flowfokus-server 0.0.0.0:4000->4000/tcp
 flowfokus-db 127.0.0.1:54329->5432/tcp
 "#;
         let scan = parse_scan(out);
-        let found: Vec<(u16, Option<&str>)> = scan.iter().map(|(p, n)| (*p, n.as_deref())).collect();
+        let found: Vec<(u16, Option<&str>, bool)> =
+            scan.iter().map(|(p, l)| (*p, l.name.as_deref(), l.loopback)).collect();
         assert_eq!(
             found,
             vec![
-                (4000, Some("flowfokus-server")),
-                (4001, Some("flowfokus-portal")),
-                (5173, Some("node")),
-                (9000, None),
-                (54329, Some("flowfokus-db")),
+                (4000, Some("flowfokus-server"), false),
+                (4001, Some("flowfokus-portal"), false),
+                (5173, Some("node"), false),
+                (9000, None, true),
+                (54329, Some("flowfokus-db"), true),
             ]
         );
     }

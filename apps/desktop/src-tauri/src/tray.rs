@@ -528,10 +528,24 @@ async fn forward_ports(ui: State<'_, Ui>, id: String, ports: Vec<u16>, on: bool)
     ui.app()?.machine(&id).map_err(err)?.set_forwards(&ports, on).await.map_err(err)
 }
 
-/// Opens a forwarded port in the browser.
+/// Gives the machine's `port` a Boat link (an HTTPS address for any device) and returns it, or
+/// takes the link away (`on: false`).
 #[tauri::command]
-fn open_port(port: u16) -> Res {
-    app::open_url(&format!("http://localhost:{port}")).map_err(err)
+async fn link_port(ui: State<'_, Ui>, id: String, port: u16, on: bool) -> Res<Option<String>> {
+    ui.app()?.machine(&id).map_err(err)?.set_link(port, on).await.map_err(err)
+}
+
+/// Opens a port in the browser: its Boat link (`link`), else its forward on this computer.
+#[tauri::command]
+fn open_port(ui: State<'_, Ui>, id: String, port: u16, link: bool) -> Res {
+    let url = match link {
+        false => format!("http://localhost:{port}"),
+        true => {
+            let links = ui.app()?.machine(&id).map_err(err)?.record().links;
+            links.into_iter().find(|l| l.port == port).map(|l| l.url).ok_or("this port has no link")?
+        }
+    };
+    app::open_url(&url).map_err(err)
 }
 
 #[tauri::command]
@@ -689,6 +703,7 @@ pub fn run() {
             turn_on_connect,
             scan_ports,
             forward_ports,
+            link_port,
             open_port,
             get_machine_details,
             latest_thread,

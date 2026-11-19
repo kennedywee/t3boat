@@ -79,10 +79,10 @@ const manyExtra: MachineView[] = [
 /** What listens on each machine, and what is forwarded. */
 const mockPorts: Record<string, PortView[]> = {
   sb_7f2a: [
-    { port: 4000, name: "flowfokus-server", listening: true, forwarded: true, live: true, error: null },
-    { port: 4001, name: "flowfokus-portal", listening: true, forwarded: true, live: true, error: null },
-    { port: 4002, name: "flowfokus-site", listening: true, forwarded: false, live: false, error: null },
-    { port: 54329, name: "flowfokus-db", listening: true, forwarded: false, live: false, error: null },
+    { port: 4000, name: "flowfokus-server", listening: true, forwarded: true, live: true, error: null, link: null },
+    { port: 4001, name: "flowfokus-portal", listening: true, forwarded: true, live: true, error: null, link: "https://box-node-caf79c034da33549-4001.on.boat.dev?_token=mock" },
+    { port: 4002, name: "flowfokus-site", listening: true, forwarded: false, live: false, error: null, link: null },
+    { port: 54329, name: "flowfokus-db", listening: true, forwarded: false, live: false, error: null, link: null },
   ],
 };
 
@@ -365,10 +365,19 @@ function create(): MockBackend {
         if (on && port === 4002) throw "port 4002 is in use on this computer";
         const row = known.find((p) => p.port === port);
         if (row) Object.assign(row, { forwarded: on, live: on });
-        else if (on) known.push({ port, name: null, listening: false, forwarded: true, live: true, error: null });
+        else if (on) known.push({ port, name: null, listening: false, forwarded: true, live: true, error: null, link: null });
       }
-      mockPorts[id] = known.filter((p) => p.listening || p.forwarded).sort((a, b) => a.port - b.port);
+      mockPorts[id] = known.filter((p) => p.listening || p.forwarded || p.link).sort((a, b) => a.port - b.port);
       emit();
+    },
+
+    async link_port({ id, port, on }) {
+      await wait(900);
+      const row = (mockPorts[id] ?? []).find((p) => p.port === port);
+      if (!row?.listening && on) throw `nothing listens on port ${port} of the machine yet`;
+      if (row) row.link = on ? `https://box-node-caf79c034da33549-${port}.on.boat.dev?_token=mock` : null;
+      emit();
+      return row?.link ?? null;
     },
 
     async open_port() {},

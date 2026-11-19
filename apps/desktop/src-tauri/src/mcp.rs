@@ -73,6 +73,7 @@ enum Call {
     SignInAgent { machine: String, agent: String },
     TurnOnConnect { machine: String },
     ForwardPorts { machine: String, ports: Option<Vec<u16>>, on: Option<bool> },
+    LinkPort { machine: String, port: u16, on: Option<bool> },
     MachineDetails { machine: String },
     SetAutoSleep { machine: String, on: bool },
     OpenInT3 { machine: String },
@@ -286,10 +287,26 @@ fn tool_list() -> Value {
             &["machine"],
         ),
         tool(
+            "link_port",
+            "Gives one port of a machine a link: Boat's own HTTPS address for it, which opens on any \
+             device (a phone, someone else's browser) with nothing running on this computer; wakes the \
+             machine if asleep. The link carries an access token: whoever has it opens the port, so \
+             treat it like a password. It stays the same across sleeps. The app runs under another \
+             host name there, so one that checks its host or redirects to localhost needs its config \
+             changed; forward_ports needs none. Opening it does not keep the machine awake. \
+             `on: false` takes the link away.",
+            json!({
+                "machine": machine,
+                "port": { "type": "integer", "minimum": 1024, "maximum": 65535 },
+                "on": { "type": "boolean", "description": "Defaults to true" },
+            }),
+            &["machine", "port"],
+        ),
+        tool(
             "machine_details",
             "One machine's cost today and this month, time awake today, which agents are signed in \
              there, its T3 version and creation time, whether T3 Connect is on, and its ports: those \
-             forwarded to this computer and what listened there when last looked. Never wakes it.",
+             forwarded to this computer, their links, and what listened there when last looked. Never wakes it.",
             json!({ "machine": machine }),
             &["machine"],
         ),
@@ -441,6 +458,13 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
                     format!("{name} is on this computer at {}.", urls.join(", "))
                 }
                 (false, _) => format!("Stopped forwarding {} port(s) of {name}.", ports.len()),
+            }
+        }
+        Call::LinkPort { machine, port, on } => {
+            let m = app.machine(&machine)?;
+            match m.set_link(port, on.unwrap_or(true)).await? {
+                Some(url) => format!("Port {port} of {} is at {url} (the token in it is the access).", m.record().name),
+                None => format!("Port {port} of {} has no link any more.", m.record().name),
             }
         }
         Call::MachineDetails { machine } => serde_json::to_string(&app.details(&machine)?)?,
@@ -596,7 +620,7 @@ mod tests {
     async fn lists_tools_and_rejects_unknown_methods() {
         let tools = rpc("tools/list", json!({})).await["result"]["tools"].clone();
         let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 16);
+        assert_eq!(names.len(), 17);
         assert!(names.contains(&"sign_in_agent") && names.contains(&"delete_machine"));
         assert_eq!(rpc("ping", json!({})).await["result"], json!({}));
         assert_eq!(rpc("resources/list", json!({})).await["error"]["code"], -32601);

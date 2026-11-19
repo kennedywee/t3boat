@@ -280,18 +280,42 @@ button.row-name {
   align-items: baseline;
   gap: 8px;
 }
+.port-line {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+.port-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+}
+.port-share {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 8px;
+}
+.port-host {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .port-number,
-.port-link {
+.port-open {
   flex: none;
   font: 400 12px var(--font-mono);
 }
-.line .port-link {
+.line .port-open {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   font-size: 12px;
 }
-.port-link .icon {
+.port-open .icon {
   fill: currentColor;
 }
 .port-note {

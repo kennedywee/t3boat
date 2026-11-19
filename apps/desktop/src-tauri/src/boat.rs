@@ -228,12 +228,21 @@ impl Boat {
 
     /// Exposes `port` (bound to loopback on the sandbox) on a stable public HTTPS URL.
     pub async fn host_public(&self, id: &str, port: u16) -> Result<String> {
+        self.host(id, port, "--public", true).await
+    }
+
+    /// Exposes `port` on a stable HTTPS URL that only opens with the token it carries.
+    /// `loopback`: the service listens on loopback only, so Boat relays to it. Wrong for a
+    /// service on every address: the relay would hold its port.
+    pub async fn host_private(&self, id: &str, port: u16, loopback: bool) -> Result<String> {
+        self.host(id, port, "--private", loopback).await
+    }
+
+    async fn host(&self, id: &str, port: u16, access: &str, loopback: bool) -> Result<String> {
         let port = port.to_string();
-        let v = Self::last_json(
-            &self
-                .run(&["host", id, &port, "--public", "--localhost"], Duration::from_secs(60))
-                .await?,
-        )?;
+        let mut args = vec!["host", id, &port, access];
+        args.extend(loopback.then_some("--localhost"));
+        let v = Self::last_json(&self.run(&args, Duration::from_secs(60)).await?)?;
         v["url"]
             .as_str()
             .map(str::to_owned)

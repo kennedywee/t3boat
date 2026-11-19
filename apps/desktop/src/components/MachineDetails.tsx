@@ -499,7 +499,7 @@ function Ports({ m, d, onError }: { m: MachineView; d: Details | null; onError: 
       }
     >
       <ul className="lines">
-        {d ? ports.map((p) => <PortLine key={p.port} p={p} want={busy[p.port]} onForward={forward} onError={onError} />) : <Skeleton rows={2} />}
+        {d ? ports.map((p) => <PortLine key={p.port} id={m.id} p={p} want={busy[p.port]} onForward={forward} onError={onError} />) : <Skeleton rows={2} />}
         {d && !ports.length ? (
           <li className="line">
             <span className="line-main line-dim">
@@ -528,50 +528,93 @@ function Ports({ m, d, onError }: { m: MachineView; d: Details | null; onError: 
           </form>
         </li>
       </ul>
-      <span className="hint port-hint">Same port on this computer. A request through one keeps the machine awake.</span>
+      <span className="hint port-hint">
+        The switch brings a port to the same port on this computer. A link opens anywhere, if the app accepts its host name.
+      </span>
     </Section>
   );
 }
 
 function PortLine({
+  id,
   p,
   want,
   onForward,
   onError,
 }: {
+  id: string;
   p: PortView;
   /** the switch's position while a change runs */
   want: boolean | undefined;
   onForward: (ports: number[], on: boolean) => void;
   onError: (text: string) => void;
 }) {
+  const [linking, setLinking] = useState(false);
+  const [copied, setCopied] = useState(false);
   const note = p.error ?? (p.listening ? p.name : "nothing listening");
+  const fail = (e: unknown) => onError(errorText(e));
+
+  const link = (on: boolean) => {
+    setLinking(true);
+    call("link_port", { id, port: p.port, on })
+      .catch(fail)
+      .finally(() => setLinking(false));
+  };
+  const copy = () =>
+    navigator.clipboard.writeText(p.link ?? "").then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }, fail);
+
   return (
-    <li className="line">
-      <span className="line-main port" title={p.error ?? undefined}>
-        {p.live ? (
-          <button
-            className="btn btn-link port-link"
-            onClick={() => call("open_port", { port: p.port }).catch((e) => onError(errorText(e)))}
-          >
-            localhost:{p.port}
-            <Icon name="open" size={8} />
+    <li className="line port-line">
+      <div className="port-top">
+        <span className="line-main port" title={p.error ?? undefined}>
+          {p.live ? (
+            <button
+              className="btn btn-link port-open"
+              onClick={() => call("open_port", { id, port: p.port, link: false }).catch(fail)}
+            >
+              localhost:{p.port}
+              <Icon name="open" size={8} />
+            </button>
+          ) : (
+            <span className="port-number">{p.port}</span>
+          )}
+          {note ? <span className={`caption port-note${p.error ? " is-error" : ""}`}>{note}</span> : null}
+        </span>
+        {want !== undefined || linking ? <Dots /> : null}
+        {p.link || !p.listening ? null : (
+          <button className="btn btn-link" disabled={linking} onClick={() => link(true)}>
+            Link
           </button>
-        ) : (
-          <span className="port-number">{p.port}</span>
         )}
-        {note ? <span className={`caption port-note${p.error ? " is-error" : ""}`}>{note}</span> : null}
-      </span>
-      {want !== undefined ? <Dots /> : null}
-      <input
-        type="checkbox"
-        role="switch"
-        className="switch"
-        aria-label={`Forward port ${p.port}`}
-        checked={want ?? p.forwarded}
-        disabled={want !== undefined}
-        onChange={(e) => onForward([p.port], e.target.checked)}
-      />
+        <input
+          type="checkbox"
+          role="switch"
+          className="switch"
+          aria-label={`Forward port ${p.port} to this computer`}
+          checked={want ?? p.forwarded}
+          disabled={want !== undefined}
+          onChange={(e) => onForward([p.port], e.target.checked)}
+        />
+      </div>
+      {p.link ? (
+        <div className="port-share">
+          <span className="caption selectable port-host" title="Opens on any device. The token in the link is the access.">
+            {new URL(p.link).host}
+          </span>
+          <button className="btn btn-link" onClick={() => call("open_port", { id, port: p.port, link: true }).catch(fail)}>
+            Open
+          </button>
+          <button className="btn btn-link" onClick={copy}>
+            {copied ? "Copied" : "Copy"}
+          </button>
+          <button className="btn btn-link" disabled={linking} onClick={() => link(false)}>
+            Remove
+          </button>
+        </div>
+      ) : null}
     </li>
   );
 }

@@ -18,7 +18,7 @@ Chat in T3 Code as usual. A message to a sleeping machine wakes it; running work
 - Add projects the way T3 Code's "Add to another machine" does, `.env` files included
 - Sign Claude Code or Codex in on a machine with their own login
 - T3 Connect, to reach a machine from your phone or browser
-- A machine's dev servers at `localhost` in your own browser, same ports as on the machine
+- A machine's dev servers at `localhost` in your own browser, same ports as on the machine, or on a Boat link for any device
 - Cost per machine, today and this month
 - An MCP server, so agents on your computer can manage machines
 

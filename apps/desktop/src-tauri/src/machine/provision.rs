@@ -230,5 +230,6 @@ pub async fn create(
         next_due_at: None,
         connect: false,
         forwards: Vec::new(),
+        links: Vec::new(),
     })
 }
