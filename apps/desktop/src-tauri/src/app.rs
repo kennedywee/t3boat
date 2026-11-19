@@ -239,6 +239,13 @@ impl App {
         self.machines.write().unwrap().push(Running { machine, tasks: vec![proxy, runner] });
     }
 
+    /// Before the app quits: no tunnel process is left behind.
+    pub async fn stop_forwards(&self) {
+        for machine in self.machines() {
+            machine.stop_forwards().await;
+        }
+    }
+
     pub fn machines(&self) -> Vec<Arc<MachineRuntime>> {
         self.machines.read().unwrap().iter().map(|r| r.machine.clone()).collect()
     }
@@ -638,6 +645,8 @@ pub struct MachineDetails {
     pub created_at: i64,
     /// T3 Connect is on: other devices reach it with the user's T3 account.
     pub connect: bool,
+    /// What listened there at the last `scan_ports`, and the ports forwarded to this computer.
+    pub ports: Vec<crate::machine::ports::PortView>,
 }
 
 #[derive(Serialize)]
@@ -669,6 +678,7 @@ impl App {
             t3_version: record.t3_version,
             created_at: record.created_at,
             connect: record.connect,
+            ports: machine.port_views(),
         })
     }
 

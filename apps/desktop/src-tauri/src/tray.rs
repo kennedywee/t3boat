@@ -516,6 +516,38 @@ async fn keep_awake(ui: State<'_, Ui>, id: String, minutes: Option<u32>) -> Res 
     ui.app()?.machine(&id).map_err(err)?.keep_awake(minutes).await.map_err(err)
 }
 
+/// Looks for dev servers on the machine; `get_machine_details` then lists them. Never wakes it.
+#[tauri::command]
+async fn scan_ports(ui: State<'_, Ui>, id: String) -> Res {
+    ui.app()?.machine(&id).map_err(err)?.scan_ports().await.map_err(err)
+}
+
+/// Forwards the machine's `ports` to the same ports on this computer, or stops (`on: false`).
+#[tauri::command]
+async fn forward_ports(ui: State<'_, Ui>, id: String, ports: Vec<u16>, on: bool) -> Res {
+    ui.app()?.machine(&id).map_err(err)?.set_forwards(&ports, on).await.map_err(err)
+}
+
+/// Gives the machine's `port` a Boat link (an HTTPS address for any device) and returns it, or
+/// takes the link away (`on: false`).
+#[tauri::command]
+async fn link_port(ui: State<'_, Ui>, id: String, port: u16, on: bool) -> Res<Option<String>> {
+    ui.app()?.machine(&id).map_err(err)?.set_link(port, on).await.map_err(err)
+}
+
+/// Opens a port in the browser: its Boat link (`link`), else its forward on this computer.
+#[tauri::command]
+fn open_port(ui: State<'_, Ui>, id: String, port: u16, link: bool) -> Res {
+    let url = match link {
+        false => format!("http://localhost:{port}"),
+        true => {
+            let links = ui.app()?.machine(&id).map_err(err)?.record().links;
+            links.into_iter().find(|l| l.port == port).map(|l| l.url).ok_or("this port has no link")?
+        }
+    };
+    app::open_url(&url).map_err(err)
+}
+
 #[tauri::command]
 async fn resize_machine(ui: State<'_, Ui>, id: String, size: String) -> Res {
     ui.app()?.machine(&id).map_err(err)?.resize(&size).await.map_err(err)
@@ -669,6 +701,10 @@ pub fn run() {
             keep_awake,
             sign_in_agent,
             turn_on_connect,
+            scan_ports,
+            forward_ports,
+            link_port,
+            open_port,
             get_machine_details,
             latest_thread,
             update_settings,
@@ -748,10 +784,14 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building t3boat")
-        .run(|_, event| {
+        .run(|handle, event| match event {
             // A tray app keeps running with its window closed.
-            if let tauri::RunEvent::ExitRequested { api, code: None, .. } = event {
-                api.prevent_exit();
+            tauri::RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
+            tauri::RunEvent::Exit => {
+                if let Ok(app) = handle.state::<Ui>().app() {
+                    tauri::async_runtime::block_on(app.stop_forwards());
+                }
             }
+            _ => {}
         });
 }

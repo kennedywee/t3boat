@@ -45,6 +45,20 @@ pub struct Machine {
     /// T3 Connect is on there: other devices reach it with the user's T3 account.
     #[serde(default)]
     pub connect: bool,
+    /// Ports forwarded to this computer at the same number while the machine runs.
+    #[serde(default)]
+    pub forwards: Vec<u16>,
+    /// Ports with a Boat link: an HTTPS address of their own, for any device.
+    #[serde(default)]
+    pub links: Vec<PortLink>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortLink {
+    pub port: u16,
+    /// Carries its access token: whoever has it opens the port.
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

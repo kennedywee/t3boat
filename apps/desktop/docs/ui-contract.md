@@ -75,6 +75,15 @@ interface MachineDetails {
   t3Version: string;          // T3 server version on the machine, e.g. "0.0.21"
   createdAt: number;          // unix secs
   connect: boolean;           // T3 Connect is on: the user's phone or a browser reach it with their T3 account
+  ports: {                    // what listened there at the last scan_ports, then the forwarded ports not among them
+    port: number;
+    name: string | null;      // what listens: a container's name, else the process's
+    listening: boolean;       // seen at the last scan; a forwarded port can be false ("nothing listening")
+    forwarded: boolean;       // turned on; kept across sleeps
+    live: boolean;            // reachable now at http://localhost:<port> on this computer → show it as a link
+    error: string | null;     // why a forwarded port is not live (e.g. the port got taken here)
+    link: string | null;      // its Boat link, access token included → show the host, with Open, Copy, Remove
+  }[];
 }
 ```
 
@@ -92,6 +101,10 @@ interface MachineDetails {
 | `pair_machine` | `{ id }` | re-sends T3 Code's "add backend" dialog (secondary "Add to T3 Code again") |
 | `sign_in_agent` | `{ id, agent }` | agent = a `signedOut` name ("Claude", "Codex"); resolves once signed in (user finishes in the browser, up to 10 min) |
 | `turn_on_connect` | `{ id }` | turns on T3 Connect with T3's own `t3 up --connect` on the machine: T3's sign-in page opens in the browser, the user approves it, T3 restarts there; resolves once other devices can reach it (up to ~15 min). Rejects while an agent works (the restart would stop it). Details shows "other devices · T3 Connect" with Turn on, or "on" |
+| `scan_ports` | `{ id }` | looks for dev servers on the machine; `get_machine_details.ports` then lists them. Never wakes it: asleep, it resolves and the last list stays. Details calls it on open, when the machine comes up, and from "Rescan" |
+| `forward_ports` | `{ id, ports, on }` | forwards those ports to the same ports on this computer, or stops (`on: false`). On wakes a sleeping machine and resolves once they are reachable; rejects naming a port in use on this computer, which is then left off. At most 20 per machine. Details has a switch per port, "Forward all" and a field that takes a port, several, or a range (`3000-3010`) |
+| `link_port` | `{ id, port, on }` | → the link or null. Gives the port Boat's own HTTPS address, which opens on any device and stays the same across sleeps; `on: false` takes it away. Wakes a sleeping machine. Rejects when nothing listens on the port. The link is private: its token is the access |
+| `open_port` | `{ id, port, link }` | opens the port in the browser: its Boat link (`link: true`), else `http://localhost:<port>` |
 | `keep_awake` | `{ id, minutes }` | keeps the machine up that long even unused (`null`: until stopped, i.e. no auto sleep; 0 ends it; "Sleep now" ends it too); wakes it if asleep; enforced on the machine, so it holds with the laptop closed. Details has an **Auto sleep** switch (on = `!keepAwakeForever`; off → `null`, on → `0`) and, while auto sleep is on, a one-time "Stay awake for…" (15m · 30m · 1h · 2h) that runs out by itself, with Stop (`0`) while `keepAwakeUntil` is set |
 | `resize_machine` | `{ id, size }` | asleep: applies on next wake; idle: sleeps and wakes onto it now (about a minute), keeping a "keep awake"; working (an agent or a build): applies after it next sleeps, never mid-turn |
 | `delete_machine` | `{ id, discard? }` | permanent; UI must confirm first. Rejects while an agent or build works on it, or while its state can't be told yet (e.g. mid-wake); then offer "Delete anyway" = `discard: true`. T3 Code cannot be told to forget a backend, so deleting a paired machine brings T3 Code to the front with a notification naming the entry to remove under Settings → Environments. Its local port is never given to another machine, so that entry can't reach one |

@@ -100,9 +100,9 @@ impl MachineRuntime {
         };
         let port = callback_port(&url).ok_or_else(|| anyhow!("the {agent:?} login has no local callback"))?;
         let _forward = boat
-            .forward(&id, port)
+            .forward(&id, port, port)
             .await
-            .with_context(|| format!("forwarding port {port} for the {agent:?} login"))?;
+            .with_context(|| format!("forwarding port {port} for the {agent:?} login; finish or close another sign-in first"))?;
         crate::app::open_url(&url)?;
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
