@@ -103,13 +103,14 @@ systemctl --user daemon-reload
 systemctl --user enable t3boat-watchdog.service >/dev/null 2>&1
 systemctl --user restart t3boat-watchdog.service
 
-# Fleet: the user's skills and agent setup (t3boat's "Fleet repo" setting, `-` for none). A timer
-# pulls it 30 s after boot and every 15 minutes and runs its install.sh, so a pushed change reaches
-# the machine with no re-provision. Boat signs git in to GitHub a moment after a resume, so a
-# failed sync retries.
-cat >"$boat_dir/fleet-sync.sh" <<'SYNC'
+# Fleet: the user's skills and agent setup (t3boat's "Fleet repo" setting, `-` for none). The machine
+# clones the repo once and runs its install.sh. After that the machine changes only when the user
+# asks an agent for a "fleet sync" (the fleet's own skill): nothing pulls on a timer. Boat signs git
+# in to GitHub a moment after a resume, so a failed clone retries.
+cat >"$boat_dir/fleet-install.sh" <<'INSTALL'
 #!/usr/bin/env bash
-# t3boat: keeps ~/fleet current and installed. Run by t3boat-fleet.timer; logs to ~/.t3boat/fleet.log.
+# t3boat: clones the fleet repo to ~/fleet and installs it, once. Run by t3boat-fleet.service; logs
+# to ~/.t3boat/fleet.log. A checkout that is already there is left alone.
 set -uo pipefail
 boat_dir="$HOME/.t3boat"
 repo="$(cat "$boat_dir/fleet-repo" 2>/dev/null || true)"
@@ -124,52 +125,40 @@ if [ -d "$dir/.git" ] && [ "$(git -C "$dir" config --get remote.origin.url 2>/de
   mv "$dir" "$aside" || { say "could not move $dir aside"; exit 1; }
   say "fleet repo is now $repo: the old checkout is in $aside"
 fi
+# Already cloned and installed: updates are the user's call.
+[ -d "$dir/.git" ] && [ -f "$boat_dir/fleet-installed" ] && exit 0
 if [ ! -d "$dir/.git" ]; then
   git clone -q "$url" "$dir" 2>>"$log" || { say "clone of $repo failed"; exit 1; }
-else
-  git -C "$dir" pull -q --ff-only 2>>"$log" || { say "pull of $repo failed"; exit 1; }
 fi
 head="$(git -C "$dir" rev-parse HEAD)"
-# Nothing new since the last install: skip it (it checks plugins, which takes a while).
-[ "$head" = "$(cat "$boat_dir/fleet-installed" 2>/dev/null || true)" ] && exit 0
 bash "$dir/install.sh" >>"$log" 2>&1 || { say "install.sh failed at ${head:0:7}"; exit 1; }
 echo "$head" >"$boat_dir/fleet-installed"
 say "installed $repo at ${head:0:7}"
-SYNC
-chmod 700 "$boat_dir/fleet-sync.sh"
+INSTALL
+chmod 700 "$boat_dir/fleet-install.sh"
 cat >"$units/t3boat-fleet.service" <<'UNIT'
 [Unit]
-Description=t3boat fleet: pull the fleet repo and install it
+Description=t3boat fleet: clone the fleet repo and install it, once
 After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -lc 'exec %h/.t3boat/fleet-sync.sh'
+ExecStart=/bin/bash -lc 'exec %h/.t3boat/fleet-install.sh'
 Restart=on-failure
 RestartSec=120
 UNIT
-cat >"$units/t3boat-fleet.timer" <<'UNIT'
-[Unit]
-Description=t3boat fleet: sync at boot and every 15 minutes
-
-[Timer]
-OnBootSec=30s
-OnUnitActiveSec=15min
-
-[Install]
-WantedBy=timers.target
-UNIT
+# Machines provisioned before this had a timer that pulled every 15 minutes.
+systemctl --user disable --now t3boat-fleet.timer >/dev/null 2>&1 || true
+rm -f "$units/t3boat-fleet.timer" "$boat_dir/fleet-sync.sh"
 systemctl --user daemon-reload
 if [ "$fleet" = "-" ]; then
   rm -f "$boat_dir/fleet-repo" "$boat_dir/fleet-installed"
-  systemctl --user disable --now t3boat-fleet.timer >/dev/null 2>&1 || true
 else
   if [ "$(cat "$boat_dir/fleet-repo" 2>/dev/null || true)" != "$fleet" ]; then
     echo "$fleet" >"$boat_dir/fleet-repo"
     rm -f "$boat_dir/fleet-installed"
   fi
-  systemctl --user enable --now t3boat-fleet.timer >/dev/null 2>&1
-  # Now, not in 15 minutes; without waiting, so provisioning is not held up by a clone.
+  # Without waiting, so provisioning is not held up by a clone.
   systemctl --user start --no-block t3boat-fleet.service
 fi
 

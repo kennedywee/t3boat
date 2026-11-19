@@ -56,8 +56,8 @@ pub struct LinkToken {
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub start_at_login: bool,
-    /// The user's fleet repo on GitHub (`owner/name`): skills and agent setup every machine pulls
-    /// and installs with its `install.sh`. `None`: machines get no fleet.
+    /// The user's fleet repo on GitHub (`owner/name`): skills and agent setup every machine clones
+    /// and installs once with its `install.sh`. `None`: machines get no fleet.
     pub fleet_repo: Option<String>,
 }
 

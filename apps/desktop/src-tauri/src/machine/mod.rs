@@ -537,7 +537,7 @@ impl MachineRuntime {
         Ok(())
     }
 
-    /// The fleet repo machines pull, from the app's settings.
+    /// The fleet repo machines clone, from the app's settings.
     fn fleet_repo(&self) -> Option<String> {
         self.shared.settings.read().unwrap().fleet_repo.clone()
     }

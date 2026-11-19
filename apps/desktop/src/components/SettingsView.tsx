@@ -42,7 +42,7 @@ function FleetRepo({ value, onSave }: { value: string; onSave: (repo: string) =>
       </span>
       <span id="fleet-repo-hint" className={`hint${valid ? "" : " is-error"}`}>
         {valid
-          ? "Skills and agent setup every machine pulls and installs: at wake and every 15 minutes. Empty: none."
+          ? "Skills and agent setup every machine clones and installs once. To update a machine, ask an agent on it for a fleet sync. Empty: none."
           : "Use a GitHub owner/name, like kennedywee/fleet."}
       </span>
     </div>
