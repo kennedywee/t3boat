@@ -315,6 +315,16 @@ impl MachineRuntime {
         }
     }
 
+    fn follow_size(&self, sb: &crate::boat::Sandbox) {
+        let record = self.record.read().unwrap();
+        let Some(size) = sb.size.as_deref().filter(|s| *s != record.size && provision::size(s).is_ok()) else { return };
+        if record.resize_pending {
+            return;
+        }
+        drop(record);
+        self.update_record(|m| m.size = size.to_owned());
+    }
+
     pub async fn refresh_power(&self) -> Result<Power> {
         let id = self.sandbox_id();
         match self.shared.boat.info(&id).await {
@@ -324,6 +334,7 @@ impl MachineRuntime {
                     return Ok(self.power());
                 }
                 *self.stopped_at.lock().unwrap() = sb.stopped_at;
+                self.follow_size(&sb);
                 let mut p = Power::from_sandbox(&sb);
                 if p == Power::Stopped {
                     *self.stop_seen.lock().unwrap() = None;
@@ -458,6 +469,7 @@ impl MachineRuntime {
                         self.restore().await?;
                         restored = true;
                     }
+                    self.update_record(|m| m.resize_pending = false);
                     resumed = true;
                     break;
                 }
@@ -525,12 +537,13 @@ impl MachineRuntime {
             )
             .await
             .context("Boat deleted this machine's disk after 14 days asleep, and restoring its snapshot failed")?;
-        // The snapshot can predate the last upgrade and the stored chats: clearing the version
-        // makes the wake re-provision and drop them.
+        // The snapshot can predate the last upgrade and the stored chats: the wake provisions it
+        // again, on the version its watchdog reports unless that one is newer.
         self.update_record(|m| {
             m.sandbox_id = sandbox;
-            m.t3_version.clear();
+            m.provision_revision.clear();
         });
+        self.forget_recorded();
         if let Err(e) = boat.delete(&record.sandbox_id).await {
             tracing::warn!("deleting {}'s expired sandbox {}: {e:#}", record.id, record.sandbox_id);
         }
@@ -592,9 +605,8 @@ impl MachineRuntime {
     fn learn_t3_version(&self, status: &WatchdogStatus) {
         let Some(version) = status.t3_version.as_deref() else { return };
         let known = self.record.read().unwrap().t3_version.clone();
-        // Empty: a restore cleared it, and the wake provisions the machine again. Mid-upgrade
-        // the new watchdog answers before this app has noted its own change.
-        if known.is_empty() || known == version || self.provisioning.try_lock().is_err() {
+        // Mid-upgrade the new watchdog answers before this app has noted its own change.
+        if known == version || self.provisioning.try_lock().is_err() {
             return;
         }
         tracing::info!("{} runs T3 {version}, set on another computer (was {known})", self.id());
@@ -602,6 +614,11 @@ impl MachineRuntime {
             m.t3_version = version.to_owned();
             m.t3_set_elsewhere = true;
         });
+        self.forget_recorded();
+    }
+
+    /// What was recorded describes a server or a disk that is no longer the machine's.
+    pub(crate) fn forget_recorded(&self) {
         self.cache.lock().unwrap().bump_epoch();
         self.drop_server_encoding();
     }
@@ -842,7 +859,10 @@ impl MachineRuntime {
         if self.record().size == size {
             return Ok(());
         }
-        self.update_record(|m| m.size = size.to_owned());
+        self.update_record(|m| {
+            m.size = size.to_owned();
+            m.resize_pending = true;
+        });
         if self.settled_power().await != Power::Running {
             return Ok(());
         }

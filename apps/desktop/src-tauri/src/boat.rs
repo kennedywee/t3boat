@@ -17,6 +17,8 @@ pub struct Boat {
 pub struct Sandbox {
     pub id: String,
     pub state: String,
+    #[serde(rename = "type", default)]
+    pub size: Option<String>,
     pub stopped_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 

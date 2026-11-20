@@ -15,6 +15,10 @@ pub struct Machine {
     pub sandbox_id: String,
     pub name: String,
     pub size: String,
+    /// `size` was chosen here and Boat does not run it yet. Otherwise `size` follows Boat, where
+    /// another computer may have changed it.
+    #[serde(default)]
+    pub resize_pending: bool,
     /// Public HTTPS URL of the T3 server on the sandbox.
     pub upstream_url: String,
     /// Bearer token the proxy uses upstream. Never leaves this computer except to that server.

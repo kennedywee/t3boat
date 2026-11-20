@@ -227,6 +227,10 @@ pub async fn adopt(boat: &Boat, sandbox_id: &str) -> Result<Adopted> {
 /// names it only in its snapshot, and only while it runs on its first sandbox.
 pub fn adopted_id(adopted: &Adopted, name: &str, sandbox_id: &str) -> Result<String> {
     if let Some(id) = adopted.machine_id.as_deref().filter(|id| !id.is_empty()) {
+        // The id names a folder on this computer, and the machine is not trusted with a path.
+        if !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')) {
+            bail!("the machine reports an id that is not a Boat sandbox id");
+        }
         return Ok(id.to_owned());
     }
     if adopted.snapshot == snapshot_name(name, sandbox_id) {
@@ -279,6 +283,7 @@ pub async fn create(
         sandbox_id: id,
         name: name.to_owned(),
         size: size.to_owned(),
+        resize_pending: false,
         upstream_url,
         upstream_token: provisioned
             .upstream_token
@@ -335,6 +340,9 @@ mod tests {
         assert_eq!(adopted_id(&adopted(None, "t3boat-skye-bx-new"), "skye", "bx_new").unwrap(), "bx_new");
         // Restored onto another sandbox before it kept its id: nothing says which machine it is.
         assert!(adopted_id(&adopted(None, "t3boat-skye-bx-old"), "skye", "bx_new").is_err());
+        for id in ["..", "../x", "/tmp/x", "a/b", "a\\b", "."] {
+            assert!(adopted_id(&adopted(Some(id), "x"), "skye", "bx_new").is_err(), "{id}");
+        }
     }
 
     #[test]

@@ -333,13 +333,21 @@ impl App {
     }
 
     /// Claims the name and a local port for a new machine, so concurrent creates never share
-    /// either.
-    fn reserve(&self, name: &str) -> Result<u16> {
+    /// either. `replaced` is the machine it takes the place of: it keeps that one's port.
+    fn reserve(&self, name: &str, replaced: Option<&crate::store::Machine>) -> Result<u16> {
         let mut creating = self.creating.lock().unwrap();
         let records: Vec<_> = self.machines().iter().map(|m| m.record()).collect();
-        let names = records.iter().map(|m| &m.name).chain(creating.iter().map(|c| &c.name));
+        let names = records
+            .iter()
+            .filter(|m| replaced.is_none_or(|r| r.id != m.id))
+            .map(|m| &m.name)
+            .chain(creating.iter().map(|c| &c.name));
         if names.into_iter().any(|n| n.eq_ignore_ascii_case(name)) {
             bail!("a machine called {name} already exists");
+        }
+        if let Some(r) = replaced {
+            creating.push(Creating { name: name.to_owned(), step: "Preparing".into(), port: r.local_port, sandbox: None });
+            return Ok(r.local_port);
         }
         let retired = self.retired_ports.lock().unwrap();
         let used: Vec<u16> = records
@@ -375,7 +383,7 @@ impl App {
         if !valid_name(name) {
             bail!("machine names are 1-32 lowercase letters, digits or dashes, starting with a letter or digit");
         }
-        let port = self.reserve(name)?;
+        let port = self.reserve(name, None)?;
         self.shared.changed();
         let result = async {
             let version = self.shared.t3.version().await?;
@@ -440,7 +448,13 @@ impl App {
             .find(|s| s.id == sandbox_id && s.adoptable)
             .ok_or_else(|| anyhow!("{sandbox_id} is not a t3boat machine from another computer"))?;
         let name = sandbox.name.as_deref().and_then(provision::machine_name).unwrap_or_default().to_owned();
-        let port = self.reserve(&name)?;
+        // Another computer restored it onto a new sandbox: this one's row says "Deleted on Boat".
+        let replaced = self
+            .machines()
+            .into_iter()
+            .find(|m| m.power() == Power::Missing && m.record().name.eq_ignore_ascii_case(&name))
+            .map(|m| m.record());
+        let port = self.reserve(&name, replaced.as_ref())?;
         self.shared.changed();
         let result = async {
             let size = sandbox.size.clone().unwrap_or_else(|| "default".to_owned());
@@ -458,15 +472,20 @@ impl App {
             self.set_creating_step(&name, "Reading the machine");
             let adopted = provision::adopt(boat, sandbox_id).await?;
             let id = provision::adopted_id(&adopted, &name, sandbox_id)?;
-            if let Some(m) = self.machines().iter().find(|m| m.id() == id) {
+            if let Some(old) = replaced.as_ref().filter(|old| old.id != id) {
+                bail!("{} here is another machine, deleted on Boat: delete it here first", old.name);
+            }
+            if let Some(m) = self.machines().iter().find(|m| m.id() == id && replaced.is_none()) {
                 bail!("already on this computer as {}", m.record().name);
             }
             let (upstream_url, watchdog_url) = provision::host(boat, sandbox_id).await?;
-            let machine = self.runtime(crate::store::Machine {
+            let old = replaced.clone();
+            let record = crate::store::Machine {
                 id,
                 sandbox_id: sandbox_id.to_owned(),
                 name: name.clone(),
                 size,
+                resize_pending: false,
                 upstream_url,
                 upstream_token: adopted.upstream_token,
                 watchdog_url,
@@ -477,14 +496,26 @@ impl App {
                 provision_revision: adopted.revision.unwrap_or_default(),
                 gh_uploads_revision: None,
                 environment_id: adopted.environment_id,
-                client_tokens: Vec::new(),
-                link_tokens: Vec::new(),
-                created_at: sandbox.created_at.map_or_else(|| chrono::Utc::now().timestamp(), |t| t.timestamp()),
+                // T3 Code stays paired with a machine that was here before.
+                client_tokens: old.as_ref().map(|m| m.client_tokens.clone()).unwrap_or_default(),
+                link_tokens: old.as_ref().map(|m| m.link_tokens.clone()).unwrap_or_default(),
+                created_at: match &old {
+                    Some(m) => m.created_at,
+                    None => sandbox.created_at.map_or_else(|| chrono::Utc::now().timestamp(), |t| t.timestamp()),
+                },
                 next_due_at: None,
-                connect: false,
-                forwards: Vec::new(),
-                links: Vec::new(),
-            });
+                connect: old.as_ref().is_some_and(|m| m.connect),
+                forwards: old.as_ref().map(|m| m.forwards.clone()).unwrap_or_default(),
+                links: old.map(|m| m.links).unwrap_or_default(),
+            };
+            if let Some(old) = &replaced {
+                self.remove_runtime(&old.id).await;
+            }
+            let machine = self.runtime(record);
+            if replaced.is_some() {
+                // Saved from the sandbox that is gone; the snapshot may be older.
+                machine.forget_recorded();
+            }
             // The watchdog was frozen mid-stop: told of the resume, it counts the idle time anew.
             machine.send_activity(resumed).await;
             if let Err(e) = machine.prime().await {
@@ -498,10 +529,28 @@ impl App {
         self.shared.persist();
         self.shared.changed();
         let machine = result?;
+        if !machine.record().client_tokens.is_empty() {
+            return Ok(machine);
+        }
         if let Err(e) = self.pair(&machine) {
             self.shared.notify(format!("Couldn't open T3 Code for {name}"), format!("{e:#}; use Add to T3 Code"));
         }
         Ok(machine)
+    }
+
+    /// Ends the machine's proxy and loop, and waits until its port is free.
+    async fn remove_runtime(&self, id: &str) {
+        let running = {
+            let mut machines = self.machines.write().unwrap();
+            let idx = machines.iter().position(|r| r.machine.id() == id);
+            idx.map(|i| machines.remove(i))
+        };
+        let Some(running) = running else { return };
+        running.machine.stop_forwards().await;
+        for task in running.tasks {
+            task.abort();
+            let _ = task.await;
+        }
     }
 
     /// This computer's T3 projects that can go to a machine: those with a git remote.
