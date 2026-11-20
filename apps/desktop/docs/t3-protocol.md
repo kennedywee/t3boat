@@ -84,7 +84,8 @@ All endpoints are in `C:environmentHttp.ts:584-627`; the client calls are in `CR
      ```
    - The client checks the expected id, the known-address rule and protocol compatibility (`CR:connection/compatibility.ts`).
 2. **`POST /oauth/token`**
-   - Body is `application/x-www-form-urlencoded` (`C:auth.ts:220-229`); built by `bootstrapRemoteBearerSession` (`remote.ts:145-170`). No `dpop` header for direct pairing.
+   - Body is `application/x-www-form-urlencoded` (`C:auth.ts:220-229`); built by `bootstrapRemoteBearerSession` (`remote.ts:145-170`).
+   - Since nightly 20261119, a desktop app that has a DPoP signer sends a `dpop` header here when the descriptor carries `capabilities.accessTokenRenewal` (`preparePairingRegistration`). It then keeps the token as a DPoP credential, whatever `token_type` the answer names. Every later request carries `Authorization: DPoP <token>` and a `dpop` proof header, and the socket URL a `dpop` query parameter. It renews by sending the token itself as `subject_token` (`directDpopToken`), only when the token is rejected or about to expire; the proxy's lasts ten years. With a `Bearer` token the machine's server ignores a stray proof, so the proxy may pass it on. An earlier pairing stays on `Bearer`. Accept both schemes: a 401 on the ticket route shows in T3 Code as "T3 Code on {host} did not answer", retried forever.
      ```
      grant_type=urn:ietf:params:oauth:grant-type:token-exchange
      &subject_token=<pairing token>
