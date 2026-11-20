@@ -100,7 +100,7 @@ async fn cors(req: Request, next: Next) -> Response {
 }
 
 fn client_authorized(m: &MachineRuntime, headers: &HeaderMap) -> bool {
-    auth::bearer(headers).is_some_and(|t| m.record().client_tokens.iter().any(|c| c == t))
+    auth::client_token(headers).is_some_and(|t| m.record().client_tokens.iter().any(|c| c == t))
 }
 
 fn unauthorized() -> Response {

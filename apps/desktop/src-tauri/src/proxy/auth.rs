@@ -81,9 +81,32 @@ pub fn bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
+/// T3 Code's own token, under either scheme it sends it with. A T3 Code that pairs with a
+/// server offering `accessTokenRenewal` keeps the token as a DPoP credential and sends
+/// `DPoP <token>` with a proof. The proof is not checked: the proxy answers loopback only,
+/// where the token alone is the access, as it is under `Bearer`.
+pub fn client_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    let value = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("DPoP "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t3_code_sends_its_token_as_bearer_or_dpop() {
+        let with = |value: &'static str| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(axum::http::header::AUTHORIZATION, axum::http::HeaderValue::from_static(value));
+            headers
+        };
+        assert_eq!(client_token(&with("Bearer t")), Some("t"));
+        assert_eq!(client_token(&with("DPoP t")), Some("t"));
+        assert_eq!(client_token(&with("Basic t")), None);
+        // A link's token is a bearer token only.
+        assert_eq!(bearer(&with("DPoP t")), None);
+    }
 
     #[test]
     fn a_ticket_opens_only_what_it_was_issued_for() {
