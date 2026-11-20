@@ -229,6 +229,7 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
           state={state}
           onSave={(settings) => call("update_settings", { settings }).catch((e) => toast(errorText(e)))}
           onConnectUploads={() => call("connect_github_uploads", undefined).catch((e) => toast(errorText(e)))}
+          onGithubEverything={(on) => call("set_github_everything", { on }).catch((e) => toast(errorText(e)))}
           onDisconnectUploads={() =>
             call("disconnect_github_uploads", undefined).catch((e) => toast(errorText(e)))
           }

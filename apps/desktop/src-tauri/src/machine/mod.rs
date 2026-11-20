@@ -47,6 +47,8 @@ const DUE_WAKE_RETRY: Duration = Duration::from_secs(5 * 60);
 /// while it stays up.
 const LINK_CHECK: Duration = Duration::from_secs(10 * 60);
 const GH_UPLOADS_RETRY: Duration = Duration::from_secs(60);
+/// How long a wake waits for a changed GitHub login to reach the machine.
+const GH_UPLOADS_ON_WAKE: Duration = Duration::from_secs(20);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Power {
@@ -144,9 +146,11 @@ pub struct Shared {
 
 impl Shared {
     pub fn extras(&self) -> provision::Extras {
+        let uploads = self.github_uploads.read().unwrap();
         provision::Extras {
             fleet: self.settings.read().unwrap().fleet_repo.clone(),
-            gh_upload_token: self.github_uploads.read().unwrap().as_ref().map(|g| g.token.clone()),
+            gh_upload_token: uploads.as_ref().map(|g| g.token.clone()),
+            gh_everything: uploads.as_ref().is_some_and(|g| g.everything),
         }
     }
     pub fn changed(&self) {
@@ -175,7 +179,7 @@ pub struct MachineRuntime {
     /// One change to the machine at a time. Each reads the settings once it holds this, so a
     /// disconnect that overtakes a connect still wins.
     provisioning: tokio::sync::Mutex<()>,
-    /// The loop's "GitHub uploads" try: for which settings, and when it failed (`None`: running).
+    /// The loop's "GitHub login" try: for which settings, and when it failed (`None`: running).
     gh_uploads_try: Mutex<Option<(String, Option<Instant>)>>,
     /// One capture at a time: "sleep now" and the background poll can see the same drain.
     capturing: tokio::sync::Mutex<()>,
@@ -507,6 +511,13 @@ impl MachineRuntime {
                 tracing::warn!("upgrading {id}: {e:#}");
             }
         }
+        // A login changed while the machine slept, before any work runs with the old one. The
+        // loop retries a failure.
+        match tokio::time::timeout(GH_UPLOADS_ON_WAKE, self.apply_gh_uploads()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("bringing the GitHub login to {id}: {e:#}"),
+            Err(_) => tracing::warn!("bringing the GitHub login to {id} took too long"),
+        }
         // Before Running is published: T3 Code reconnects then, and must find the messages
         // accepted while asleep ahead of anything it sends next.
         self.on_ready().await;
@@ -581,13 +592,23 @@ impl MachineRuntime {
         Ok(())
     }
 
-    /// Leaves the running machine with the settings' upload token, or without one.
+    /// Leaves the running machine with the settings' GitHub login, or without one.
     async fn bring_gh_uploads(&self) -> Result<()> {
-        let (boat, id) = (&self.shared.boat, self.sandbox_id());
+        // The login first: it must not wait behind apt. This fails while `gh` is too old to
+        // upload, with the login already in place.
+        if self.apply_gh_uploads().await.is_ok() {
+            return Ok(());
+        }
         // Outside the lock: apt can take minutes, and a disconnect must not wait behind it.
         if self.shared.extras().gh_upload_token.is_some() {
+            let (boat, id) = (&self.shared.boat, self.sandbox_id());
             let _ = provision::gh_uploads(boat, &id, "upgrade", &provision::Extras::default()).await;
         }
+        self.apply_gh_uploads().await
+    }
+
+    async fn apply_gh_uploads(&self) -> Result<()> {
+        let (boat, id) = (&self.shared.boat, self.sandbox_id());
         let _one = self.provisioning.lock().await;
         let extras = self.shared.extras();
         let revision = provision::gh_uploads_revision(&extras);
@@ -1076,7 +1097,7 @@ impl MachineRuntime {
                     tokio::spawn(async move {
                         let result = this.bring_gh_uploads().await;
                         if let Err(e) = &result {
-                            tracing::warn!("bringing GitHub uploads to {}: {e:#}", this.id());
+                            tracing::warn!("bringing the GitHub login to {}: {e:#}", this.id());
                         }
                         let mut last = this.gh_uploads_try.lock().unwrap();
                         if last.as_ref().is_some_and(|(revision, _)| *revision == gh_uploads) {

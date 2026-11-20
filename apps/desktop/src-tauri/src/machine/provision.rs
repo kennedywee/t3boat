@@ -27,6 +27,8 @@ pub fn own_port(port: u16) -> bool {
 pub struct Extras {
     pub fleet: Option<String>,
     pub gh_upload_token: Option<String>,
+    /// The token is for all of `gh` and git on the machine, not only for uploads.
+    pub gh_everything: bool,
 }
 
 /// Identifies the provisioning scripts and the fleet repo; a machine provisioned with others gets
@@ -43,10 +45,12 @@ pub fn revision(extras: &Extras) -> String {
     format!("{hash:016x}")
 }
 
-/// Identifies what `gh-uploads.sh` leaves on a machine: the script and the token, or none.
+/// Identifies what `gh-uploads.sh` leaves on a machine: the script, and the token with what it
+/// is for, or none.
 pub fn gh_uploads_revision(extras: &Extras) -> String {
     let token = extras.gh_upload_token.as_deref().unwrap_or_default();
-    format!("{:016x}", fnv1a(GH_UPLOADS_SH.bytes().chain([0]).chain(token.bytes())))
+    let everything = u8::from(extras.gh_everything && !token.is_empty());
+    format!("{:016x}", fnv1a(GH_UPLOADS_SH.bytes().chain([0, everything]).chain(token.bytes())))
 }
 
 /// The fleet repo as `provision.sh` takes it: `owner/name`, or `-` for none.
@@ -145,7 +149,7 @@ pub async fn run(
         "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
          echo {p} | base64 -d > \"$d/provision.sh\"; echo {w} | base64 -d > \"$d/watchdog.mjs\"\n\
          echo {g} | base64 -d > \"$d/gh-uploads.sh\"\n\
-         T3BOAT_SECRET={s} T3BOAT_GH_UPLOAD_TOKEN={gh} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet} {machine} {revision}\n",
+         T3BOAT_SECRET={s} T3BOAT_GH_UPLOAD_TOKEN={gh} T3BOAT_GH_EVERYTHING={everything} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet} {machine} {revision}\n",
         p = b64(PROVISION_SH),
         w = b64(WATCHDOG_MJS),
         g = b64(GH_UPLOADS_SH),
@@ -159,6 +163,7 @@ pub async fn run(
         machine = shell_word(machine_id)?,
         revision = revision(extras),
         gh = shell_word(extras.gh_upload_token.as_deref().unwrap_or_default())?,
+        everything = u8::from(extras.gh_everything),
     );
     let out = run_uploaded(boat, sandbox_id, &script, 600).await?;
     let line = out
@@ -187,10 +192,11 @@ pub async fn gh_uploads(boat: &Boat, sandbox_id: &str, part: &str, extras: &Extr
     let script = format!(
         "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
          echo {g} | base64 -d > \"$d/gh-uploads.sh\"\n\
-         T3BOAT_GH_UPLOAD_TOKEN={gh} bash \"$d/gh-uploads.sh\" {part}\n",
+         T3BOAT_GH_UPLOAD_TOKEN={gh} T3BOAT_GH_EVERYTHING={everything} bash \"$d/gh-uploads.sh\" {part}\n",
         part = shell_word(part)?,
         g = base64::engine::general_purpose::STANDARD.encode(GH_UPLOADS_SH),
         gh = shell_word(extras.gh_upload_token.as_deref().unwrap_or_default())?,
+        everything = u8::from(extras.gh_everything),
     );
     run_uploaded(boat, sandbox_id, &script, 400).await.map(drop)
 }
@@ -319,6 +325,20 @@ mod tests {
         for (a, b) in [("0.1.10", "0.1.10"), ("0.1.9", "0.1.10"), ("", "0.1.10"), ("0.1.10", "main")] {
             assert!(!newer_t3(a, b), "{a} {b}");
         }
+    }
+
+    #[test]
+    fn gh_uploads_revision_follows_the_token_and_what_it_is_for() {
+        let extras = |token: Option<&str>, gh_everything| Extras {
+            fleet: None,
+            gh_upload_token: token.map(str::to_owned),
+            gh_everything,
+        };
+        let uploads = gh_uploads_revision(&extras(Some("gho_a"), false));
+        assert_ne!(uploads, gh_uploads_revision(&extras(Some("gho_a"), true)));
+        assert_ne!(uploads, gh_uploads_revision(&extras(Some("gho_b"), false)));
+        assert_ne!(uploads, gh_uploads_revision(&extras(None, false)));
+        assert_eq!(gh_uploads_revision(&extras(None, false)), gh_uploads_revision(&extras(None, true)));
     }
 
     fn adopted(machine_id: Option<&str>, snapshot: &str) -> Adopted {

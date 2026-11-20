@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Runs on a Boat sandbox, as `user`. Idempotent, and restarts nothing: safe while agents work.
-#   [T3BOAT_GH_UPLOAD_TOKEN=<token>] gh-uploads.sh [all|upgrade|apply]
+#   [T3BOAT_GH_UPLOAD_TOKEN=<token> [T3BOAT_GH_EVERYTHING=1]] gh-uploads.sh [all|upgrade|apply]
 # `upgrade` is apt alone, `apply` the wrapper and the token: a disconnect runs only `apply`.
+# T3BOAT_GH_EVERYTHING: the token is for all of gh and git, not only for uploads.
 set -euo pipefail
 mode="${1:-all}"
+token="${T3BOAT_GH_UPLOAD_TOKEN:-}"
+everything=0
+[ -z "$token" ] || [ "${T3BOAT_GH_EVERYTHING:-}" != 1 ] || everything=1
 boat_dir="$HOME/.t3boat"
 mkdir -p "$boat_dir"
 chmod 700 "$boat_dir"
@@ -11,7 +15,8 @@ chmod 700 "$boat_dir"
 # First, before anything below can fail.
 if [ "$mode" != upgrade ]; then
   rm -f "$boat_dir/gh-upload-token.new"
-  [ -n "${T3BOAT_GH_UPLOAD_TOKEN:-}" ] || rm -f "$boat_dir/gh-upload-token"
+  [ "$everything" = 1 ] || rm -f "$boat_dir/gh-everything"
+  [ -n "$token" ] || rm -f "$boat_dir/gh-upload-token"
 fi
 
 # The image's gh predates `--attach`. Only GitHub's apt repo is refreshed.
@@ -31,8 +36,18 @@ cat >"$HOME/.local/bin/gh.t3boat-new" <<'WRAPPER'
 #!/usr/bin/env bash
 # t3boat: Boat's gh, with the user's own GitHub token for commands that upload a file (--attach).
 # GitHub's upload server refuses the GitHub App token gh has here.
+# With ~/.t3boat/gh-everything the token is for every command. Git asks `gh auth git-credential`
+# for its password, finds this file first on PATH and so gets the same token.
 real=/usr/bin/gh
 token_file="$HOME/.t3boat/gh-upload-token"
+
+if [ -e "$HOME/.t3boat/gh-everything" ] && [ -s "$token_file" ]; then
+  case "${1:-} ${2:-}" in
+    # gh refuses these while GH_TOKEN is set, and Boat signs its own login in with them.
+    "auth login" | "auth logout" | "auth refresh" | "auth setup-git" | "auth switch") exec "$real" "$@" ;;
+  esac
+  GH_TOKEN="$(cat "$token_file")" exec "$real" "$@"
+fi
 
 uploads() {
   # `gh pr -R owner/repo edit 7` is `pr edit`.
@@ -70,15 +85,24 @@ if uploads "$@"; then
   if [ -s "$token_file" ]; then
     GH_TOKEN="$(cat "$token_file")" exec "$real" "$@"
   fi
-  echo "t3boat: uploads need \"GitHub uploads\" connected in t3boat's settings on your computer." >&2
+  echo "t3boat: uploads need \"GitHub login\" connected in t3boat's settings on your computer." >&2
 fi
 exec "$real" "$@"
 WRAPPER
 chmod 755 "$HOME/.local/bin/gh.t3boat-new"
 mv -f "$HOME/.local/bin/gh.t3boat-new" "$HOME/.local/bin/gh"
-if [ -n "${T3BOAT_GH_UPLOAD_TOKEN:-}" ]; then
-  (umask 077 && printf '%s' "$T3BOAT_GH_UPLOAD_TOKEN" >"$boat_dir/gh-upload-token.new")
+if [ -n "$token" ]; then
+  (umask 077 && printf '%s' "$token" >"$boat_dir/gh-upload-token.new")
   mv -f "$boat_dir/gh-upload-token.new" "$boat_dir/gh-upload-token"
+  if [ "$everything" = 1 ]; then
+    : >"$boat_dir/gh-everything"
+    # Git must reach the wrapper through its credential helper. A failure gets this tried again.
+    answer="$(printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null || true)"
+    if [ "$(printf '%s\n' "$answer" | sed -n 's/^password=//p')" != "$token" ]; then
+      echo "git on this machine does not use the GitHub login yet" >&2
+      exit 4
+    fi
+  fi
   # A failure gets this tried again.
   if ! /usr/bin/gh pr edit --help 2>/dev/null | grep -q -- --attach; then
     echo "gh on this machine has no --attach yet" >&2

@@ -1,7 +1,7 @@
 // Browser-only stand-in for the Tauri backend so `bun run dev` works without Tauri.
 // URL params shape the starting state: ?setup=installBoat|signInBoat|installT3|starting
 // ?machines=0|many|<count>  ?busy=1  ?mcp=mixed (Claude Code added, Codex not installed)
-// ?uploads=1 (GitHub uploads connected)
+// ?uploads=1 (GitHub login connected), with &everything=1 (used for all of gh and git)
 // ?projects=0|error (T3 Code has no projects with a remote / listing them fails)
 // ?ready=1 (a new machine comes up in T3 Code with its agents signed in and acme on it, as the website shows it)
 import type { Backend } from "./api";
@@ -118,7 +118,7 @@ function seed(): UiState {
     machines: structuredClone(machines),
     costs: { today: 0.42, month: 12.8, startsToday: 3, startsLimit: 50 },
     settings: { startAtLogin: true, fleetRepo: null },
-    githubUploads: { connected: params.get("uploads") === "1", login: params.get("uploads") === "1" ? "you" : null, code: null },
+    githubUploads: { connected: params.get("uploads") === "1", login: params.get("uploads") === "1" ? "you" : null, everything: params.get("everything") === "1", code: null },
     mcp: params.get("mcp") === "mixed" ? { claudeCode: true, codex: null } : { claudeCode: false, codex: false },
     sizes: [
       { id: "small", spec: "2 vCPU · 4 GB", hourly: 0.018 },
@@ -408,15 +408,20 @@ function create(): MockBackend {
     },
 
     async connect_github_uploads() {
-      state.githubUploads = { connected: false, login: null, code: "9F3A-C0DE" };
+      state.githubUploads = { connected: false, login: null, everything: false, code: "9F3A-C0DE" };
       emit();
       await wait(4000);
-      state.githubUploads = { connected: true, login: "you", code: null };
+      state.githubUploads = { connected: true, login: "you", everything: false, code: null };
       emit();
     },
 
     async disconnect_github_uploads() {
-      state.githubUploads = { connected: false, login: null, code: null };
+      state.githubUploads = { connected: false, login: null, everything: false, code: null };
+      emit();
+    },
+
+    async set_github_everything({ on }) {
+      state.githubUploads = { ...state.githubUploads, everything: on };
       emit();
     },
 
