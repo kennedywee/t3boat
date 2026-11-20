@@ -178,12 +178,18 @@ pub async fn run(
 /// line, which `boat history` keeps. Returns stdout.
 async fn run_uploaded(boat: &Boat, sandbox_id: &str, script: &str, timeout_secs: u64) -> Result<String> {
     let name = format!("t3boat-provision-{}.sh", random_token());
-    let local = std::env::temp_dir().join(&name);
-    crate::store::write_private(&local, script.as_bytes())?;
+    // Removed on drop: a caller that gives up mid-upload must not leave the token on disk.
+    struct Removed(std::path::PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let local = Removed(std::env::temp_dir().join(&name));
+    crate::store::write_private(&local.0, script.as_bytes())?;
     let remote = format!("/tmp/{name}");
-    let uploaded = boat.upload(sandbox_id, &local, &remote).await;
-    let _ = std::fs::remove_file(&local);
-    uploaded?;
+    boat.upload(sandbox_id, &local.0, &remote).await?;
+    drop(local);
     boat.exec_ok(sandbox_id, &format!("bash {remote}"), timeout_secs).await
 }
 
