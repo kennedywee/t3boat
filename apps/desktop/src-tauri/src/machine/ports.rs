@@ -249,13 +249,13 @@ impl MachineRuntime {
             .await
             .map_err(|_| anyhow!("port {port} is in use on this computer"))?;
         let tunnel = std::net::TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
-        let mut child = self.shared.boat.forward(&self.sandbox_id(), port, tunnel).await?;
+        let mut ssh = self.shared.boat.forward(&self.sandbox_id(), port, tunnel).await?;
         let machine = Arc::downgrade(self);
         Ok(Forward(tokio::spawn(async move {
             let mut relays = JoinSet::new();
             loop {
                 tokio::select! {
-                    _ = child.wait() => return,
+                    _ = ssh.ended() => return,
                     Some(_) = relays.join_next() => {}
                     accepted = listener.accept() => {
                         let (Ok((mut client, _)), Some(machine)) = (accepted, machine.upgrade()) else { return };

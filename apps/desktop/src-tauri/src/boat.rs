@@ -316,39 +316,69 @@ impl Boat {
     }
 
     /// Forwards `local` on this computer to `remote` in the sandbox, for as long as the returned
-    /// process lives.
-    pub async fn forward(&self, id: &str, remote: u16, local: u16) -> Result<tokio::process::Child> {
+    /// tunnel lives.
+    pub async fn forward(&self, id: &str, remote: u16, local: u16) -> Result<Tunnel> {
         // Else another listener on the port would pass the readiness check below.
         if std::net::TcpListener::bind(("127.0.0.1", local)).is_err() {
             bail!("port {local} is in use on this computer");
         }
         let (port, remote) = (local, remote.to_string());
         let p = port.to_string();
-        let mut cmd = command(&self.bin);
-        cmd.args(["forward", id, "--remote", &remote, "--local", &p])
-            .env("BOAT_NO_UPDATE", "1")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        // A tunnel must not outlive this app when it is killed: nothing is dropped then.
-        #[cfg(target_os = "linux")]
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-                Ok(())
-            });
-        }
-        let mut child = cmd.spawn().context("running boat forward")?;
+        let mut tunnel = Tunnel::spawn(&self.bin, &["forward", id, "--remote", &remote, "--local", &p])
+            .context("running boat forward")?;
         for _ in 0..100 {
-            if let Some(status) = child.try_wait()? {
+            if let Some(status) = tunnel.child.try_wait()? {
                 bail!("boat forward exited ({status}); is port {port} free on this computer?");
             }
             if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-                return Ok(child);
+                return Ok(tunnel);
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         bail!("boat forward did not open port {port}")
+    }
+}
+
+/// A running `boat forward`. It ends when this is dropped, and when this app dies.
+pub struct Tunnel {
+    child: tokio::process::Child,
+    _stdin: Option<tokio::process::ChildStdin>,
+}
+
+impl Tunnel {
+    /// `boat forward` runs `ssh` and does not stop it when it is itself killed, so a kill of
+    /// the CLI alone leaves the port taken. A shell holds both in one process group and ends
+    /// the group when its stdin closes: on drop, and on any death of this app.
+    #[cfg(unix)]
+    fn spawn(bin: &Path, args: &[&str]) -> std::io::Result<Self> {
+        let mut cmd = command("sh");
+        cmd.args(["-c", r#"{ "$@"; kill 0; } & read _; kill 0"#, "sh"])
+            .arg(bin)
+            .args(args)
+            .env("BOAT_NO_UPDATE", "1")
+            .process_group(0)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = cmd.spawn()?;
+        let stdin = child.stdin.take();
+        Ok(Self { child, _stdin: stdin })
+    }
+
+    #[cfg(not(unix))]
+    fn spawn(bin: &Path, args: &[&str]) -> std::io::Result<Self> {
+        let mut cmd = command(bin);
+        cmd.args(args)
+            .env("BOAT_NO_UPDATE", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        Ok(Self { child: cmd.spawn()?, _stdin: None })
+    }
+
+    /// Returns once the tunnel has ended by itself.
+    pub async fn ended(&mut self) {
+        let _ = self.child.wait().await;
     }
 }
 
@@ -360,4 +390,46 @@ fn said<'a>(stdout: &'a str, stderr: &'a str) -> &'a str {
 /// Command-line form of a path; the Boat CLI and git only take UTF-8 here.
 pub(crate) fn path_str(path: &Path) -> Result<&str> {
     path.to_str().ok_or_else(|| anyhow!("path is not UTF-8: {}", path.display()))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::Tunnel;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    fn alive(pid: &str) -> bool {
+        std::process::Command::new("kill").args(["-0", pid]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+    }
+
+    #[tokio::test]
+    async fn a_dropped_tunnel_takes_the_ssh_of_its_cli_with_it() {
+        let dir = std::env::temp_dir().join(format!("t3boat-tunnel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (cli, pidfile) = (dir.join("boat"), dir.join("pid"));
+        // Like the CLI: starts a child and leaves it running when it is killed.
+        std::fs::write(&cli, "#!/bin/sh\nsleep 300 &\necho $! > \"$1\"\nwait\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let tunnel = Tunnel::spawn(&cli, &[pidfile.to_str().unwrap()]).unwrap();
+        let mut pid = String::new();
+        for _ in 0..100 {
+            pid = std::fs::read_to_string(&pidfile).unwrap_or_default().trim().to_owned();
+            if !pid.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(alive(&pid), "the child of the CLI runs while the tunnel is held");
+
+        drop(tunnel);
+        for _ in 0..100 {
+            if !alive(&pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!alive(&pid), "the child of the CLI ends with the tunnel");
+    }
 }
