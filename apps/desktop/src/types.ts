@@ -81,6 +81,8 @@ export interface UiState {
 export interface GithubUploads {
   connected: boolean;
   login: string | null;
+  /** machines use the login for all of gh and git, not only for uploads */
+  everything: boolean;
   /** while a sign-in waits: the code GitHub's page asks for */
   code: string | null;
 }
@@ -168,6 +170,7 @@ export interface Commands {
   update_settings: [{ settings: Settings }, void];
   connect_github_uploads: [undefined, void]; // resolves once signed in, after the browser sign-in
   disconnect_github_uploads: [undefined, void];
+  set_github_everything: [{ on: boolean }, void];
   setup_action: [{ action: SetupAction }, void];
   quit_app: [undefined, void];
 }

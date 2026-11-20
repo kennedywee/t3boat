@@ -85,13 +85,16 @@ pub struct Settings {
     pub fleet_repo: Option<String>,
 }
 
-/// The user's own GitHub login, which machines use for `gh` uploads only. The token acts as the
-/// user until they revoke it on GitHub.
+/// The user's own GitHub login, which machines use for `gh` uploads, or with `everything` for all
+/// of `gh` and git in place of Boat's login. The token acts as the user until they revoke it on
+/// GitHub.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GithubUploads {
     pub token: String,
     pub login: Option<String>,
+    #[serde(default)]
+    pub everything: bool,
 }
 
 impl Default for Settings {

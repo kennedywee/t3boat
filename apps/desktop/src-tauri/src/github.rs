@@ -1,5 +1,6 @@
-//! "GitHub uploads": the user's own GitHub login, which machines need for `gh … --attach`
-//! (GitHub's upload server refuses the GitHub App token Boat gives them). The sign-in runs this
+//! "GitHub login": the user's own GitHub login, which machines need for `gh … --attach`
+//! (GitHub's upload server refuses the GitHub App token Boat gives them) and can use for all of
+//! `gh` and git. The sign-in runs this
 //! computer's `gh` in a config folder of its own, so the user's own `gh` login is not touched.
 
 use crate::process::command;
@@ -45,7 +46,8 @@ async fn sign_in_with(bin: &Path, config_dir: &Path, on_code: impl FnOnce(&str))
     // `--insecure-storage`: the system keyring would replace the user's own gh login.
     let mut login = gh(bin, config_dir)
         .args(["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"])
-        .args(["--skip-ssh-key", "--insecure-storage"])
+        // `workflow`: without it GitHub refuses a push that changes a workflow file.
+        .args(["--skip-ssh-key", "--insecure-storage", "--scopes", "workflow"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -84,7 +86,7 @@ async fn sign_in_with(bin: &Path, config_dir: &Path, on_code: impl FnOnce(&str))
         bail!("gh gave no token after the sign-in");
     }
     let login = output(gh(bin, config_dir).args(["api", "user", "--jq", ".login"])).await.ok().filter(|l| !l.is_empty());
-    Ok(GithubUploads { token, login })
+    Ok(GithubUploads { token, login, everything: false })
 }
 
 async fn output(cmd: &mut tokio::process::Command) -> Result<String> {

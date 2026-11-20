@@ -326,6 +326,21 @@ impl App {
         Ok(())
     }
 
+    /// Whether machines use the connected login for all of `gh` and git.
+    pub fn github_everything(&self) -> bool {
+        self.shared.github_uploads.read().unwrap().as_ref().is_some_and(|g| g.everything)
+    }
+
+    /// Each machine's loop brings the change over.
+    pub fn set_github_everything(&self, on: bool) -> Result<()> {
+        match self.shared.github_uploads.write().unwrap().as_mut() {
+            Some(uploads) => uploads.everything = on,
+            None => anyhow::bail!("Connect GitHub first"),
+        }
+        self.shared.persist();
+        Ok(())
+    }
+
     /// Each machine's loop brings the change over.
     pub fn set_github_uploads(&self, uploads: Option<GithubUploads>) {
         *self.shared.github_uploads.write().unwrap() = uploads;

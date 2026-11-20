@@ -103,6 +103,7 @@ struct UiState {
 struct GithubUploadsView {
     connected: bool,
     login: Option<String>,
+    everything: bool,
     code: Option<String>,
 }
 
@@ -129,6 +130,7 @@ impl Ui {
                 GithubUploadsView {
                     connected: uploads.is_some(),
                     login: uploads.flatten(),
+                    everything: app.as_ref().is_some_and(|a| a.github_everything()),
                     code: self.github_code.lock().unwrap().clone(),
                 }
             },
@@ -607,6 +609,13 @@ async fn disconnect_github_uploads(handle: AppHandle, ui: State<'_, Ui>) -> Res 
 }
 
 #[tauri::command]
+async fn set_github_everything(handle: AppHandle, ui: State<'_, Ui>, on: bool) -> Res {
+    ui.app()?.set_github_everything(on).map_err(err)?;
+    emit_state(&handle);
+    Ok(())
+}
+
+#[tauri::command]
 async fn setup_action(handle: AppHandle, ui: State<'_, Ui>, action: String) -> Res {
     let set_busy = |busy: bool| {
         handle.state::<Ui>().setup.lock().unwrap().busy = busy;
@@ -717,6 +726,7 @@ pub fn run() {
             update_settings,
             connect_github_uploads,
             disconnect_github_uploads,
+            set_github_everything,
             setup_action,
             add_mcp,
             quit_app

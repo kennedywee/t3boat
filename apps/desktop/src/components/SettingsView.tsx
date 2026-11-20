@@ -62,6 +62,7 @@ interface Props {
   /** never rejects; resolves once signed in or given up */
   onConnectUploads: () => Promise<void>;
   onDisconnectUploads: () => void;
+  onGithubEverything: (on: boolean) => void;
   onQuit: () => void;
   onBack: () => void;
 }
@@ -72,6 +73,7 @@ export function SettingsView({
   onAddMcp,
   onConnectUploads,
   onDisconnectUploads,
+  onGithubEverything,
   onQuit,
   onBack,
 }: Props) {
@@ -124,7 +126,7 @@ export function SettingsView({
         <FleetRepo value={s.fleetRepo ?? ""} onSave={(repo) => change({ fleetRepo: repo || null })} />
         <div className="setting">
           <span className="caption">github</span>
-          <span className="setting-name">GitHub uploads</span>
+          <span className="setting-name">GitHub login</span>
           <div className="mcp-buttons">
             {uploads.connected ? (
               <>
@@ -154,11 +156,30 @@ export function SettingsView({
                 Enter <code className="step-code">{uploads.code}</code> on the GitHub page that opened.
               </>
             ) : uploads.connected ? (
-              "Machines use this login only to upload images and videos. Disconnecting takes it off them; to revoke it, remove GitHub CLI under GitHub → Settings → Applications."
+              "Machines use this login to upload images and videos. Disconnecting takes it off them; to revoke it, remove GitHub CLI under GitHub → Settings → Applications."
             ) : (
-              "Lets agents on machines attach images and videos to pull requests and issues (gh … --attach). GitHub refuses those uploads from the login Boat gives a machine, so this adds your own, for uploads only."
+              "Lets agents on machines attach images and videos to pull requests and issues (gh … --attach). GitHub refuses those uploads from the login Boat gives a machine, so this adds your own. It can also replace Boat's login for everything."
             )}
           </span>
+          {uploads.connected && (
+            <label className="toggle">
+              <span className="toggle-text">
+                <span className="toggle-name">Use for everything</span>
+                <span className="hint">
+                  {uploads.everything
+                    ? "gh and git on machines act as you: every repo you can reach, with your full access"
+                    : "gh and git on machines use Boat's login: only the repos its GitHub app can reach"}
+                </span>
+              </span>
+              <input
+                type="checkbox"
+                role="switch"
+                className="switch"
+                checked={uploads.everything}
+                onChange={(e) => onGithubEverything(e.target.checked)}
+              />
+            </label>
+          )}
         </div>
         <div className="setting">
           <span className="caption">mcp</span>
