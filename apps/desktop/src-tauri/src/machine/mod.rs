@@ -469,7 +469,8 @@ impl MachineRuntime {
                         self.restore().await?;
                         restored = true;
                     }
-                    self.update_record(|m| m.resize_pending = false);
+                    // A resize asked for during the resume stays pending.
+                    self.update_record(|m| m.resize_pending &= m.size != record.size);
                     resumed = true;
                     break;
                 }
