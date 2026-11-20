@@ -15,6 +15,10 @@ pub struct Machine {
     pub sandbox_id: String,
     pub name: String,
     pub size: String,
+    /// `size` was chosen here and Boat does not run it yet. Otherwise `size` follows Boat, where
+    /// another computer may have changed it.
+    #[serde(default)]
+    pub resize_pending: bool,
     /// Public HTTPS URL of the T3 server on the sandbox.
     pub upstream_url: String,
     /// Bearer token the proxy uses upstream. Never leaves this computer except to that server.
@@ -26,6 +30,9 @@ pub struct Machine {
     pub local_port: u16,
     /// T3 server version installed on the machine.
     pub t3_version: String,
+    /// Another computer's t3boat installed that version, not this one.
+    #[serde(default)]
+    pub t3_set_elsewhere: bool,
     /// `provision::revision()` of the scripts the machine runs.
     pub provision_revision: String,
     /// `provision::gh_uploads_revision()` of what the machine has. `None`: unknown.

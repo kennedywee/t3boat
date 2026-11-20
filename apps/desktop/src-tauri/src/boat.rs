@@ -17,6 +17,8 @@ pub struct Boat {
 pub struct Sandbox {
     pub id: String,
     pub state: String,
+    #[serde(rename = "type", default)]
+    pub size: Option<String>,
     pub stopped_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -36,6 +38,9 @@ pub struct SandboxSummary {
     pub memory_gb: Option<f64>,
     #[serde(rename = "createdAt", default)]
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// A t3boat machine that another computer created: this one can add it. Set by the app.
+    #[serde(skip_deserializing)]
+    pub adoptable: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

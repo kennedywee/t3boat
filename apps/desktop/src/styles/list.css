@@ -246,7 +246,7 @@
   margin-top: 8px;
 }
 
-/* sandboxes on the Boat account that t3boat did not create: start/stop only */
+/* sandboxes on the Boat account that are not machines on this computer */
 .others {
   flex: none;
   border-top: 1px solid var(--line);

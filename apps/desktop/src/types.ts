@@ -126,6 +126,8 @@ export interface BoatSandbox {
   vcpu: number | null;
   memoryGB: number | null;
   createdAt: string | null;
+  /** a t3boat machine that another computer created: this one can add it */
+  adoptable: boolean;
 }
 
 /** The theme Omarchy applied, from its colors.toml. */
@@ -143,6 +145,7 @@ export interface Commands {
   omarchy_theme: [undefined, OmarchyTheme | null];
   other_sandboxes: [undefined, BoatSandbox[]];
   set_sandbox_running: [{ id: string; running: boolean }, void]; // resolves once Boat has done it
+  adopt_machine: [{ id: string }, void]; // id: an adoptable sandbox; wakes it, then it is in the machine list
   create_machine: [{ name: string; size: string; projects?: string[] }, void]; // projects: LocalProject ids to add once up
   local_projects: [undefined, LocalProject[]]; // pinned first, then most recent
   add_project: [{ id: string; projectId: string }, void]; // resolves once cloned

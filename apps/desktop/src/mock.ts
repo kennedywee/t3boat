@@ -169,12 +169,13 @@ function create(): MockBackend {
   const setupOrder: Setup[] = ["installBoat", "signInBoat", "installT3", "ready"];
 
   // sandboxes made outside t3boat (?others=0 for none)
-  const others: BoatSandbox[] =
+  let others: BoatSandbox[] =
     new URLSearchParams(location.search).get("others") === "0"
       ? []
       : [
-          { id: "bx_yq5xkd3s", name: "alpha-trial", state: "stopped", type: "default", vcpu: 4, memoryGB: 8, createdAt: "2026-11-18T13:46:23Z" },
-          { id: "bx_k2m9qp7r", name: "scratch", state: "running", type: "small", vcpu: 2, memoryGB: 4, createdAt: "2026-11-17T09:12:00Z" },
+          { id: "bx_p4s8kye2", name: "t3boat_skye", state: "stopped", type: "default", vcpu: 4, memoryGB: 8, createdAt: "2026-11-16T08:30:00Z", adoptable: true },
+          { id: "bx_yq5xkd3s", name: "alpha-trial", state: "stopped", type: "default", vcpu: 4, memoryGB: 8, createdAt: "2026-11-18T13:46:23Z", adoptable: false },
+          { id: "bx_k2m9qp7r", name: "scratch", state: "running", type: "small", vcpu: 2, memoryGB: 4, createdAt: "2026-11-17T09:12:00Z", adoptable: false },
         ];
 
   const handlers: { [C in CommandName]: (a: CommandArgs<C>) => Promise<unknown> } = {
@@ -247,6 +248,23 @@ function create(): MockBackend {
       s.state = running ? "starting" : "stopping";
       await wait(1800);
       s.state = running ? "running" : "stopped";
+    },
+
+    async adopt_machine({ id }) {
+      const s = others.find((o) => o.id === id && o.adoptable);
+      if (!s) throw `${id} is not a t3boat machine from another computer`;
+      const name = (s.name ?? "").replace(/^t3boat_/, "");
+      if (state.machines.some((m) => m.name === name)) throw `a machine called ${name} already exists`;
+      const row = machine({ id: "", name, size: s.type ?? "default", state: "creating", detail: "Waking the machine", paired: false });
+      state.machines = [...state.machines, row];
+      emit();
+      await wait(2400);
+      state.machines = state.machines.map((m) => (m.name === name ? { ...m, detail: "Reading the machine" } : m));
+      emit();
+      await wait(1800);
+      others = others.filter((o) => o.id !== id);
+      state.machines = state.machines.map((m) => (m.name === name ? { ...m, id, state: "idle", ...idle() } : m));
+      emit();
     },
 
     async wake_machine({ id }) {

@@ -112,6 +112,9 @@ pub struct WatchdogStatus {
     /// That is soon: the machine waits for it instead of sleeping.
     #[serde(default)]
     pub work_due: bool,
+    /// The T3 version installed there. Older watchdogs don't say.
+    #[serde(default)]
+    pub t3_version: Option<String>,
     pub manifest: Option<Manifest>,
     /// When this app got the status: what its second counts are relative to.
     #[serde(skip, default = "SystemTime::now")]
@@ -135,6 +138,8 @@ pub struct Shared {
     pub github_uploads: RwLock<Option<GithubUploads>>,
     pub events: mpsc::UnboundedSender<Event>,
     pub http: reqwest::Client,
+    /// Names this running app to a machine's watchdog, which may hear from several computers.
+    pub client: String,
 }
 
 impl Shared {
@@ -184,6 +189,8 @@ pub struct MachineRuntime {
     projects: Mutex<Vec<projects::MachineProject>>,
     adding: Mutex<Vec<projects::MachineProject>>,
     ports: ports::Ports,
+    /// The machine's T3 version the user was last told is ahead of this computer's.
+    warned_ahead: Mutex<Option<String>>,
 }
 
 impl MachineRuntime {
@@ -209,6 +216,7 @@ impl MachineRuntime {
             projects: Mutex::new(Vec::new()),
             adding: Mutex::new(Vec::new()),
             ports: ports::Ports::default(),
+            warned_ahead: Mutex::new(None),
         };
         if let Some(shell) = shell {
             this.set_projects_from(&shell);
@@ -307,6 +315,16 @@ impl MachineRuntime {
         }
     }
 
+    fn follow_size(&self, sb: &crate::boat::Sandbox) {
+        let record = self.record.read().unwrap();
+        let Some(size) = sb.size.as_deref().filter(|s| *s != record.size && provision::size(s).is_ok()) else { return };
+        if record.resize_pending {
+            return;
+        }
+        drop(record);
+        self.update_record(|m| m.size = size.to_owned());
+    }
+
     pub async fn refresh_power(&self) -> Result<Power> {
         let id = self.sandbox_id();
         match self.shared.boat.info(&id).await {
@@ -316,6 +334,7 @@ impl MachineRuntime {
                     return Ok(self.power());
                 }
                 *self.stopped_at.lock().unwrap() = sb.stopped_at;
+                self.follow_size(&sb);
                 let mut p = Power::from_sandbox(&sb);
                 if p == Power::Stopped {
                     *self.stop_seen.lock().unwrap() = None;
@@ -450,6 +469,8 @@ impl MachineRuntime {
                         self.restore().await?;
                         restored = true;
                     }
+                    // A resize asked for during the resume stays pending.
+                    self.update_record(|m| m.resize_pending &= m.size != record.size);
                     resumed = true;
                     break;
                 }
@@ -476,7 +497,11 @@ impl MachineRuntime {
             // T3 serves now and may have started work on its own; restarting it would kill that.
             // A restored machine booted fresh from its snapshot: nothing to kill, and the
             // upgrade drops the snapshot's stale chats.
-            if !restored && self.watchdog_get("/status?fresh").await.is_ok_and(|s| s.busy) {
+            let status = self.watchdog_get("/status?fresh").await;
+            if let Ok(s) = &status {
+                self.learn_t3_version(s);
+            }
+            if !restored && status.is_ok_and(|s| s.busy) {
                 tracing::info!("{id} is busy: upgrade deferred to the next wake");
             } else if let Err(e) = self.upgrade_if_needed().await {
                 tracing::warn!("upgrading {id}: {e:#}");
@@ -513,12 +538,13 @@ impl MachineRuntime {
             )
             .await
             .context("Boat deleted this machine's disk after 14 days asleep, and restoring its snapshot failed")?;
-        // The snapshot can predate the last upgrade and the stored chats: clearing the version
-        // makes the wake re-provision and drop them.
+        // The snapshot can predate the last upgrade and the stored chats: the wake provisions it
+        // again, on the version its watchdog reports unless that one is newer.
         self.update_record(|m| {
             m.sandbox_id = sandbox;
-            m.t3_version.clear();
+            m.provision_revision.clear();
         });
+        self.forget_recorded();
         if let Err(e) = boat.delete(&record.sandbox_id).await {
             tracing::warn!("deleting {}'s expired sandbox {}: {e:#}", record.id, record.sandbox_id);
         }
@@ -575,13 +601,56 @@ impl MachineRuntime {
         Ok(())
     }
 
+    /// The machine says which T3 version it runs. One this app did not install came from another
+    /// computer's t3boat: what was recorded from the old server is in its encoding.
+    fn learn_t3_version(&self, status: &WatchdogStatus) {
+        let Some(version) = status.t3_version.as_deref() else { return };
+        let known = self.record.read().unwrap().t3_version.clone();
+        // Mid-upgrade the new watchdog answers before this app has noted its own change.
+        if known == version || self.provisioning.try_lock().is_err() {
+            return;
+        }
+        tracing::info!("{} runs T3 {version}, set on another computer (was {known})", self.id());
+        self.update_record(|m| {
+            m.t3_version = version.to_owned();
+            m.t3_set_elsewhere = true;
+        });
+        self.forget_recorded();
+    }
+
+    /// What was recorded describes a server or a disk that is no longer the machine's.
+    pub(crate) fn forget_recorded(&self) {
+        self.cache.lock().unwrap().bump_epoch();
+        self.drop_server_encoding();
+    }
+
+    /// Recorded streams and stored chats are in the encoding of the server that sent them.
+    fn drop_server_encoding(&self) {
+        self.cache.lock().unwrap().streams.clear();
+        threads::sweep(&self.dir, &HashSet::new());
+        self.save_cache();
+    }
+
     /// Keeps the machine on the desktop app's T3 version, this app's scripts and the fleet setting.
+    /// A newer T3 version that another computer installed stays: with two computers on different
+    /// versions, each would otherwise change the machine back at every wake.
     pub async fn upgrade_if_needed(&self) -> Result<()> {
         let _one = self.provisioning.lock().await;
         let desktop = self.shared.t3.version().await?;
         let extras = self.shared.extras();
         let revision = provision::revision(&extras);
         let record = self.record();
+        let ahead = record.t3_set_elsewhere && provision::newer_t3(&record.t3_version, &desktop);
+        if ahead && self.warned_ahead.lock().unwrap().replace(record.t3_version.clone()).as_ref() != Some(&record.t3_version) {
+            self.shared.notify(
+                format!("Update T3 Code to use {}", record.name),
+                format!(
+                    "Another computer moved it to T3 Code {}. This computer has {desktop}; chats may not load until it is updated.",
+                    record.t3_version
+                ),
+            );
+        }
+        let desktop = if ahead { record.t3_version.clone() } else { desktop };
         let new_server = desktop != record.t3_version;
         if !new_server && revision == record.provision_revision {
             return Ok(());
@@ -592,6 +661,7 @@ impl MachineRuntime {
         provision::run(
             &self.shared.boat,
             &record.sandbox_id,
+            &record.id,
             &record.name,
             &desktop,
             &record.watchdog_secret,
@@ -601,20 +671,13 @@ impl MachineRuntime {
         )
         .await?;
         self.update_record(|m| {
+            m.t3_set_elsewhere = ahead;
             m.t3_version = desktop;
             m.provision_revision = revision;
         });
-        {
-            let mut cache = self.cache.lock().unwrap();
-            cache.bump_epoch();
-            if new_server {
-                // Recorded streams and stored chats are in the old server's encoding.
-                cache.streams.clear();
-            }
-        }
+        self.cache.lock().unwrap().bump_epoch();
         if new_server {
-            threads::sweep(&self.dir, &HashSet::new());
-            self.save_cache();
+            self.drop_server_encoding();
         }
         self.wait_ready(Instant::now()).await
     }
@@ -675,7 +738,7 @@ impl MachineRuntime {
 
     /// `resumed`: this app just resumed the sandbox. The watchdog was frozen mid-stop and, after
     /// a short sleep, cannot tell: it would refuse activity and report a stop for another 90 s.
-    async fn send_activity(&self, resumed: bool) {
+    pub(crate) async fn send_activity(&self, resumed: bool) {
         *self.last_heartbeat.lock().unwrap() = Some(Instant::now());
         match self.watchdog_post("/activity", json!({ "resumed": resumed })).await {
             Ok(s) => {
@@ -712,9 +775,19 @@ impl MachineRuntime {
             (format!("{}{path}", m.watchdog_url.trim_end_matches('/')), m.watchdog_secret.clone())
         };
         // These routes reply after the watchdog's own T3 check, which allows itself 10 s.
-        let refreshes = matches!(path, "/status?fresh" | "/drain" | "/sleep-ack");
-        let timeout = Duration::from_secs(if refreshes { 15 } else { 4 });
-        let mut req = self.shared.http.request(method, url).bearer_auth(secret).timeout(timeout);
+        let timeout = Duration::from_secs(match path {
+            // Waits up to 10 s for another computer's capture, then checks T3.
+            "/sleep-ack" => 25,
+            "/status?fresh" | "/drain" => 15,
+            _ => 4,
+        });
+        let mut req = self
+            .shared
+            .http
+            .request(method, url)
+            .bearer_auth(secret)
+            .header("x-t3boat-client", &self.shared.client)
+            .timeout(timeout);
         if let Some(body) = body {
             req = req.json(&body);
         }
@@ -787,7 +860,10 @@ impl MachineRuntime {
         if self.record().size == size {
             return Ok(());
         }
-        self.update_record(|m| m.size = size.to_owned());
+        self.update_record(|m| {
+            m.size = size.to_owned();
+            m.resize_pending = true;
+        });
         if self.settled_power().await != Power::Running {
             return Ok(());
         }
@@ -848,6 +924,7 @@ impl MachineRuntime {
         if s.busy {
             self.cache.lock().unwrap().bump_epoch();
         }
+        self.learn_t3_version(&s);
         if s.phase == WatchdogPhase::Active {
             // Back in use after a drain: an earlier capture no longer describes the machine.
             self.drop_capture();

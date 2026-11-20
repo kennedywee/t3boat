@@ -11,6 +11,9 @@ use serde::Deserialize;
 const PROVISION_SH: &str = include_str!("provision.sh");
 const WATCHDOG_MJS: &str = include_str!("watchdog.mjs");
 const GH_UPLOADS_SH: &str = include_str!("gh-uploads.sh");
+const ADOPT_SH: &str = include_str!("adopt.sh");
+/// How Boat lists a machine's sandbox: `t3boat_<name>`.
+const SANDBOX_PREFIX: &str = "t3boat_";
 const T3_PORT: u16 = 3773;
 const WATCHDOG_PORT: u16 = 3774;
 
@@ -55,6 +58,21 @@ fn fleet_word(fleet: Option<&str>) -> Result<&str> {
     }
 }
 
+/// Whether T3 version `a` is later than `b`, a release being later than its own nightlies
+/// (`0.1.10` after `0.1.10-nightly.20261114.4669`). False when either is not a version.
+pub fn newer_t3(a: &str, b: &str) -> bool {
+    fn key(version: &str) -> Option<(Vec<u64>, bool, Vec<u64>)> {
+        let (core, pre) = match version.split_once('-') {
+            Some((core, pre)) => (core, Some(pre)),
+            None => (version, None),
+        };
+        let core = core.split('.').map(|n| n.parse().ok()).collect::<Option<Vec<u64>>>()?;
+        let digits = |pre: &str| pre.split(|c: char| !c.is_ascii_digit()).filter_map(|n| n.parse().ok()).collect();
+        Some((core, pre.is_none(), pre.map(digits).unwrap_or_default()))
+    }
+    matches!((key(a), key(b)), (Some(a), Some(b)) if a > b)
+}
+
 /// FNV-1a: stable across builds, unlike std's hasher.
 pub fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u64 {
     bytes.into_iter().fold(0xcbf29ce484222325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3))
@@ -93,7 +111,12 @@ pub const SLEEP_AFTER_SECS: u64 = 300;
 
 /// The machine's sandbox, as Boat lists it: `t3boat_jett`.
 pub fn sandbox_name(name: &str) -> String {
-    format!("t3boat_{name}")
+    format!("{SANDBOX_PREFIX}{name}")
+}
+
+/// The machine name in a sandbox name: `None` for a sandbox t3boat did not make.
+pub fn machine_name(sandbox_name: &str) -> Option<&str> {
+    sandbox_name.strip_prefix(SANDBOX_PREFIX)
 }
 
 /// The saved snapshot the watchdog replaces at every sleep. Boat deletes a stopped sandbox's
@@ -109,6 +132,7 @@ pub fn snapshot_name(name: &str, machine_id: &str) -> String {
 pub async fn run(
     boat: &Boat,
     sandbox_id: &str,
+    machine_id: &str,
     name: &str,
     t3_version: &str,
     watchdog_secret: &str,
@@ -121,7 +145,7 @@ pub async fn run(
         "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
          echo {p} | base64 -d > \"$d/provision.sh\"; echo {w} | base64 -d > \"$d/watchdog.mjs\"\n\
          echo {g} | base64 -d > \"$d/gh-uploads.sh\"\n\
-         T3BOAT_SECRET={s} T3BOAT_GH_UPLOAD_TOKEN={gh} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet}\n",
+         T3BOAT_SECRET={s} T3BOAT_GH_UPLOAD_TOKEN={gh} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet} {machine} {revision}\n",
         p = b64(PROVISION_SH),
         w = b64(WATCHDOG_MJS),
         g = b64(GH_UPLOADS_SH),
@@ -132,6 +156,8 @@ pub async fn run(
         mint = u8::from(mint_upstream_token),
         name = shell_word(name)?,
         fleet = fleet_word(extras.fleet.as_deref())?,
+        machine = shell_word(machine_id)?,
+        revision = revision(extras),
         gh = shell_word(extras.gh_upload_token.as_deref().unwrap_or_default())?,
     );
     let out = run_uploaded(boat, sandbox_id, &script, 600).await?;
@@ -167,6 +193,50 @@ pub async fn gh_uploads(boat: &Boat, sandbox_id: &str, part: &str, extras: &Extr
         gh = shell_word(extras.gh_upload_token.as_deref().unwrap_or_default())?,
     );
     run_uploaded(boat, sandbox_id, &script, 400).await.map(drop)
+}
+
+/// A machine another computer created, as it describes itself, with a T3 token for this computer.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Adopted {
+    /// `None`: provisioned before machines kept a record of themselves.
+    pub machine_id: Option<String>,
+    pub name: Option<String>,
+    pub watchdog_secret: String,
+    pub snapshot: String,
+    pub revision: Option<String>,
+    pub t3_version: String,
+    pub environment_id: String,
+    pub upstream_token: String,
+}
+
+/// Reads a running machine's record and issues this computer its own T3 token. The machine is
+/// left as it is: no restart, whatever works on it.
+pub async fn adopt(boat: &Boat, sandbox_id: &str) -> Result<Adopted> {
+    let script = format!(
+        "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
+         echo {a} | base64 -d > \"$d/adopt.sh\"; bash \"$d/adopt.sh\"\n",
+        a = base64::engine::general_purpose::STANDARD.encode(ADOPT_SH),
+    );
+    let out = run_uploaded(boat, sandbox_id, &script, 120).await?;
+    let line = out.lines().rev().find(|l| l.starts_with('{')).ok_or_else(|| anyhow!("the machine printed no record"))?;
+    Ok(serde_json::from_str(line)?)
+}
+
+/// The machine's id from what it says of itself. One provisioned before machines kept their id
+/// names it only in its snapshot, and only while it runs on its first sandbox.
+pub fn adopted_id(adopted: &Adopted, name: &str, sandbox_id: &str) -> Result<String> {
+    if let Some(id) = adopted.machine_id.as_deref().filter(|id| !id.is_empty()) {
+        // The id names a folder on this computer, and the machine is not trusted with a path.
+        if !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')) {
+            bail!("the machine reports an id that is not a Boat sandbox id");
+        }
+        return Ok(id.to_owned());
+    }
+    if adopted.snapshot == snapshot_name(name, sandbox_id) {
+        return Ok(sandbox_id.to_owned());
+    }
+    bail!("this machine is from an older t3boat: wake it once on the computer that created it, then add it here")
 }
 
 /// Only `[A-Za-z0-9._-]` reaches the remote shell.
@@ -205,7 +275,7 @@ pub async fn create(
     created(&id);
     progress("Installing T3 Code");
     let secret = random_token();
-    let provisioned = run(boat, &id, name, t3_version, &secret, &snapshot_name(name, &id), true, extras).await?;
+    let provisioned = run(boat, &id, &id, name, t3_version, &secret, &snapshot_name(name, &id), true, extras).await?;
     progress("Opening the machine's address");
     let (upstream_url, watchdog_url) = host(boat, &id).await?;
     Ok(Machine {
@@ -213,6 +283,7 @@ pub async fn create(
         sandbox_id: id,
         name: name.to_owned(),
         size: size.to_owned(),
+        resize_pending: false,
         upstream_url,
         upstream_token: provisioned
             .upstream_token
@@ -221,6 +292,7 @@ pub async fn create(
         watchdog_secret: secret,
         local_port,
         t3_version: t3_version.to_owned(),
+        t3_set_elsewhere: false,
         provision_revision: revision(extras),
         gh_uploads_revision: None,
         environment_id: provisioned.environment_id,
@@ -232,4 +304,50 @@ pub async fn create(
         forwards: Vec::new(),
         links: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newer_t3_orders_releases_and_nightlies() {
+        assert!(newer_t3("0.1.11", "0.1.10"));
+        assert!(newer_t3("0.1.10", "0.1.10-nightly.20261114.4669"));
+        assert!(newer_t3("0.1.10-nightly.20261115.1", "0.1.10-nightly.20261114.4669"));
+        assert!(newer_t3("0.2.0-nightly.20261101.1", "0.1.10"));
+        for (a, b) in [("0.1.10", "0.1.10"), ("0.1.9", "0.1.10"), ("", "0.1.10"), ("0.1.10", "main")] {
+            assert!(!newer_t3(a, b), "{a} {b}");
+        }
+    }
+
+    fn adopted(machine_id: Option<&str>, snapshot: &str) -> Adopted {
+        Adopted {
+            machine_id: machine_id.map(str::to_owned),
+            name: None,
+            watchdog_secret: String::new(),
+            snapshot: snapshot.to_owned(),
+            revision: None,
+            t3_version: String::new(),
+            environment_id: String::new(),
+            upstream_token: String::new(),
+        }
+    }
+
+    #[test]
+    fn adopted_id_comes_from_the_record_or_the_first_sandbox() {
+        assert_eq!(adopted_id(&adopted(Some("bx_old"), "x"), "skye", "bx_new").unwrap(), "bx_old");
+        assert_eq!(adopted_id(&adopted(None, "t3boat-skye-bx-new"), "skye", "bx_new").unwrap(), "bx_new");
+        // Restored onto another sandbox before it kept its id: nothing says which machine it is.
+        assert!(adopted_id(&adopted(None, "t3boat-skye-bx-old"), "skye", "bx_new").is_err());
+        for id in ["..", "../x", "/tmp/x", "a/b", "a\\b", "."] {
+            assert!(adopted_id(&adopted(Some(id), "x"), "skye", "bx_new").is_err(), "{id}");
+        }
+    }
+
+    #[test]
+    fn machine_name_only_for_t3boat_sandboxes() {
+        assert_eq!(machine_name(&sandbox_name("skye")), Some("skye"));
+        assert_eq!(machine_name("scratch"), None);
+    }
 }
