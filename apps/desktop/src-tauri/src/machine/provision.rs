@@ -149,7 +149,7 @@ pub async fn run(
         "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
          echo {p} | base64 -d > \"$d/provision.sh\"; echo {w} | base64 -d > \"$d/watchdog.mjs\"\n\
          echo {g} | base64 -d > \"$d/gh-uploads.sh\"\n\
-         T3BOAT_SECRET={s} T3BOAT_GH_UPLOAD_TOKEN={gh} T3BOAT_GH_EVERYTHING={everything} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet} {machine} {revision}\n",
+         T3BOAT_SECRET={s} T3BOAT_GH_UPLOAD_TOKEN={gh} T3BOAT_GH_EVERYTHING={everything} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name} {fleet} {machine} {revision} {sandbox}\n",
         p = b64(PROVISION_SH),
         w = b64(WATCHDOG_MJS),
         g = b64(GH_UPLOADS_SH),
@@ -162,6 +162,7 @@ pub async fn run(
         fleet = fleet_word(extras.fleet.as_deref())?,
         machine = shell_word(machine_id)?,
         revision = revision(extras),
+        sandbox = shell_word(sandbox_id)?,
         gh = shell_word(extras.gh_upload_token.as_deref().unwrap_or_default())?,
         everything = u8::from(extras.gh_everything),
     );

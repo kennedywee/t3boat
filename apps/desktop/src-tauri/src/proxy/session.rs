@@ -213,6 +213,9 @@ impl Session {
     async fn on_request(&mut self, req: Value) -> Result<()> {
         let tag = req["tag"].as_str().unwrap_or_default().to_owned();
         tracing::debug!(phase = ?self.phase, "rpc {tag}");
+        if tag == "orchestration.subscribeShell" || tag == "orchestration.subscribeThread" {
+            tracing::info!("TRACE16 {tag} payload {}", req["payload"]);
+        }
         let action = classify::is_user_action(&tag, &req["payload"]);
         match self.phase {
             // A machine about to freeze must not take new work: wait for it, then resume it on
@@ -254,6 +257,7 @@ impl Session {
         let record = recorded_unary(&tag, payload);
         // Counted only when it reaches the machine: a call answered locally changes nothing.
         if classify::is_user_action(&tag, payload) {
+            tracing::info!("TRACE16 user action rpc {tag} on {}", self.m.id());
             self.m.user_action();
         }
         if tag == "orchestration.subscribeThread"

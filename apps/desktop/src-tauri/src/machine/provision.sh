@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Runs on a Boat sandbox, as `user`. Idempotent; also used to upgrade a machine.
-#   T3BOAT_SECRET=<watchdog-secret> [T3BOAT_GH_UPLOAD_TOKEN=<token>] provision.sh <t3-version> <sleep-after-secs> <snapshot-name> <mint-upstream-token:0|1> <name> <fleet-repo|-> <machine-id> <revision>
+#   T3BOAT_SECRET=<watchdog-secret> [T3BOAT_GH_UPLOAD_TOKEN=<token>] provision.sh <t3-version> <sleep-after-secs> <snapshot-name> <mint-upstream-token:0|1> <name> <fleet-repo|-> <machine-id> <revision> <sandbox-id>
 # Expects watchdog.mjs and gh-uploads.sh next to it. Prints one JSON line: {"environmentId", "upstreamToken"?}.
 set -euo pipefail
 
-version="$1" sleep_after="$2" snapshot="$3" mint_upstream="$4" name="$5" fleet="${6:--}" machine_id="$7" revision="$8"
+version="$1" sleep_after="$2" snapshot="$3" mint_upstream="$4" name="$5" fleet="${6:--}" machine_id="$7" revision="$8" sandbox_id="$9"
 secret="$T3BOAT_SECRET"
 here="$(cd "$(dirname "$0")" && pwd)"
 t3="$HOME/.local/bin/t3"
@@ -83,11 +83,11 @@ if [ -z "$watchdog_token" ]; then
   watchdog_token="$("$t3" auth session issue --token-only --ttl 3650d --label t3boat-watchdog --scope orchestration:read)"
 fi
 SECRET="$secret" TOKEN="$watchdog_token" SLEEP="$sleep_after" SNAPSHOT="$snapshot" \
-  MACHINE_ID="$machine_id" NAME="$name" VERSION="$version" REVISION="$revision" node -e '
+  MACHINE_ID="$machine_id" SANDBOX_ID="$sandbox_id" NAME="$name" VERSION="$version" REVISION="$revision" node -e '
   const e = process.env;
   require("fs").writeFileSync(process.argv[1], JSON.stringify({
     secret: e.SECRET, t3Token: e.TOKEN, sleepAfterSecs: Number(e.SLEEP), snapshot: e.SNAPSHOT,
-    machineId: e.MACHINE_ID, name: e.NAME, t3Version: e.VERSION, revision: e.REVISION
+    machineId: e.MACHINE_ID, sandboxId: e.SANDBOX_ID, name: e.NAME, t3Version: e.VERSION, revision: e.REVISION
   }, null, 2), { mode: 0o600 });
 ' "$config"
 install -m 600 "$here/watchdog.mjs" "$boat_dir/watchdog.mjs"

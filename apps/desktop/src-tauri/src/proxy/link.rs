@@ -117,6 +117,7 @@ pub async fn mcp(State(m): M, req: Request) -> Response {
                 return res;
             }
         }
+        tracing::info!("TRACE16 user action mcp {} on {}", String::from_utf8_lossy(&body[..body.len().min(120)]), m.id());
         m.user_action();
     }
     let route = Relay {

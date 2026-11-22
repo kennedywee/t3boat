@@ -330,6 +330,7 @@ async fn forward(State(m): M, req: Request) -> Response {
         return unauthorized();
     }
     if authorized && parts.method == Method::POST {
+        tracing::info!("TRACE16 user action POST {} on {}", parts.uri.path(), m.id());
         m.user_action();
     }
     let asset = (parts.method == Method::GET && parts.uri.path().starts_with(assets::ROUTE))
@@ -342,6 +343,7 @@ async fn forward(State(m): M, req: Request) -> Response {
         authorization: if bearer { upstream_bearer(&m) } else { None },
         wake: authorized,
     };
+    tracing::info!("TRACE16 forward {} {} {} on {} power={:?}", parts.method, parts.uri.path(), if parts.uri.path().starts_with("/api/orchestration") { parts.uri.query().unwrap_or_default() } else { "" }, m.id(), m.power());
     let answer = relay(&m, parts, body, route).await;
     // A range of it (206) is not the asset.
     let keep = asset.filter(|file| {
@@ -417,6 +419,7 @@ async fn wake(m: &MachineRuntime, allowed: bool) -> Result<(), Response> {
     if !allowed {
         return Err(StatusCode::SERVICE_UNAVAILABLE.into_response());
     }
+    tracing::info!("TRACE16 HTTP relay wakes {}", m.id());
     m.ensure_awake()
         .await
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response())

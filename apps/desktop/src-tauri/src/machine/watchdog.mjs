@@ -35,6 +35,10 @@ const STOP_SETTLE_MS = 90_000;
 const SNAPSHOT_TIMEOUT_MS = 120_000;
 
 const config = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+// Boat's `self` needs BOAT_ID, which some boots lack. Restored from a snapshot, the machine runs on
+// a new sandbox: BOAT_ID names it when set, and the provisioning that follows a restore rewrites
+// the config.
+const SANDBOX_ID = process.env.BOAT_ID || config.sandboxId;
 const log = (...args) => console.log(new Date().toISOString(), ...args);
 
 /** @type {"active" | "saving" | "draining" | "stopping"} */
@@ -266,7 +270,7 @@ async function save() {
   const mine = ++saves;
   log("saving snapshot", config.snapshot);
   // A machine that cannot save still sleeps: it must not bill on, and Boat keeps its disk 14 days.
-  await boat(["snapshot", "self", config.snapshot], SNAPSHOT_TIMEOUT_MS).catch((e) => log("snapshot failed", e.message));
+  await boat(["snapshot", SANDBOX_ID, config.snapshot], SNAPSHOT_TIMEOUT_MS).catch((e) => log("snapshot failed", e.message));
   if (phase === "saving" && mine === saves) drain();
 }
 
@@ -311,7 +315,7 @@ function stopSelf() {
   phase = "stopping";
   stopRequestedAt = Date.now();
   log("stopping sandbox");
-  boat(["stop", "self"]).catch((e) => {
+  boat(["stop", SANDBOX_ID]).catch((e) => {
     log("boat stop failed", e.message);
     touch("stop failed");
   });
@@ -487,14 +491,14 @@ const TRIAL_TTL_SECS = 7200;
 const RENEW_EVERY_MS = 10 * 60_000;
 async function renewDeadline() {
   if (phase === "stopping") return;
-  const out = await boat(["info", "self"], 20_000);
+  const out = await boat(["info", SANDBOX_ID], 20_000);
   const line = out.trim().split("\n").reverse().find((l) => l.startsWith("{"));
   const sandbox = JSON.parse(line ?? "{}").sandbox ?? {};
   // Only the trial's own shape: a deadline from a TTL of at most 2 hours. A machine on a plan
   // runs without one, and this must never add one there.
   const ttl = sandbox.ttlSeconds;
   if (!sandbox.archiveAfter || typeof ttl !== "number" || ttl > TRIAL_TTL_SECS) return;
-  await boat(["extend", "self", "--ttl", String(TRIAL_TTL_SECS)], 20_000);
+  await boat(["extend", SANDBOX_ID, "--ttl", String(TRIAL_TTL_SECS)], 20_000);
 }
 async function renewLoop() {
   await renewDeadline().catch((e) => log("renewing the trial's auto-stop failed", e.message));

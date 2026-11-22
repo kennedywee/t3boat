@@ -413,6 +413,7 @@ impl MachineRuntime {
     /// Brings the machine up if needed and returns once its T3 server answers and will stay up.
     /// Concurrent callers share one wake.
     pub async fn ensure_awake(&self) -> Result<()> {
+        tracing::debug!("TRACE16 ensure_awake {} power={:?}: {}", self.id(), self.power(), std::backtrace::Backtrace::force_capture().to_string().lines().filter(|l| l.contains("t3boat_lib::")).map(str::trim).collect::<Vec<_>>().join(" | "));
         let _guard = self.waking.lock().await;
         // Checked under the lock: a delete holding it retires the machine.
         if self.power() == Power::Missing {
@@ -426,6 +427,7 @@ impl MachineRuntime {
         if self.power() == Power::Running && !self.is_stopping() && self.fetch_descriptor().await.is_some() {
             if self.watchdog_status().is_some_and(|w| matches!(w.phase, WatchdogPhase::Saving | WatchdogPhase::Draining)) {
                 // Someone needs it after all: call the sleep off before it stops.
+                tracing::info!("TRACE16 ensure_awake calls the sleep off on {}: {}", self.id(), std::backtrace::Backtrace::force_capture().to_string().lines().filter(|l| l.contains("t3boat")).collect::<Vec<_>>().join(" | "));
                 self.send_activity(false).await;
             }
             // Too late if the watchdog is already stopping: wake_locked waits for it and resumes.
@@ -761,6 +763,7 @@ impl MachineRuntime {
     /// a short sleep, cannot tell: it would refuse activity and report a stop for another 90 s.
     pub(crate) async fn send_activity(&self, resumed: bool) {
         *self.last_heartbeat.lock().unwrap() = Some(Instant::now());
+        tracing::info!("TRACE16 POST /activity resumed={resumed} to {}", self.id());
         match self.watchdog_post("/activity", json!({ "resumed": resumed })).await {
             Ok(s) => {
                 *self.watchdog.lock().unwrap() = Some(s);
