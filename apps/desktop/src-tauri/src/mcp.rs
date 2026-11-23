@@ -557,7 +557,7 @@ async fn run_cli(client: Client, args: &[String]) -> Result<()> {
 }
 
 /// On PATH, else on the login shell's PATH.
-async fn locate(cli: &str) -> Option<PathBuf> {
+pub(crate) async fn locate(cli: &str) -> Option<PathBuf> {
     if let Ok(bin) = which::which(cli) {
         return Some(bin);
     }

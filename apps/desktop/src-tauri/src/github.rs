@@ -31,7 +31,8 @@ fn gh(bin: &Path, config_dir: &Path) -> tokio::process::Command {
 
 /// `scratch` must not exist yet; it is removed again.
 pub async fn sign_in(scratch: &Path, on_code: impl FnOnce(&str)) -> Result<GithubUploads> {
-    let bin = which::which("gh").map_err(|_| {
+    // `locate`, not `which`: an app started from the Finder has a short PATH without Homebrew's.
+    let bin = crate::mcp::locate("gh").await.ok_or_else(|| {
         anyhow!("GitHub's gh is not installed on this computer; the sign-in needs it: https://cli.github.com")
     })?;
     std::fs::create_dir_all(scratch)?;
