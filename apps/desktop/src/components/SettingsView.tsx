@@ -52,6 +52,7 @@ function FleetRepo({ value, onSave }: { value: string; onSave: (repo: string) =>
 const CLIENTS: { id: McpClient; name: string }[] = [
   { id: "claudeCode", name: "Claude Code" },
   { id: "codex", name: "Codex" },
+  { id: "antigravity", name: "Antigravity" },
 ];
 
 interface Props {

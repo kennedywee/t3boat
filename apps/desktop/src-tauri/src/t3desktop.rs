@@ -22,7 +22,7 @@ pub struct Link {
 }
 
 /// T3 Code's data directory.
-fn home() -> Result<PathBuf> {
+pub(crate) fn home() -> Result<PathBuf> {
     std::env::var_os("T3CODE_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".t3")))

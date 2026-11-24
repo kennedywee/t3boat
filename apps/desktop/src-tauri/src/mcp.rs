@@ -1,4 +1,4 @@
-//! MCP server so coding agents on this computer (Claude Code, Codex) can drive t3boat:
+//! MCP server so coding agents on this computer (Claude Code, Codex, Antigravity) can drive t3boat:
 //! streamable HTTP on loopback, one JSON response per request. Local processes are trusted
 //! (they could run the Boat CLI anyway); Host and Origin checks keep web pages out.
 
@@ -500,12 +500,14 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
     })
 }
 
-/// A coding agent CLI that can use this server.
+/// A coding agent that can use this server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Client {
     ClaudeCode,
     Codex,
+    /// T3 Code's own Antigravity provider: it has no CLI on PATH, so its config file is edited.
+    Antigravity,
 }
 
 impl Client {
@@ -513,6 +515,7 @@ impl Client {
         match self {
             Self::ClaudeCode => "claude",
             Self::Codex => "codex",
+            Self::Antigravity => unreachable!("Antigravity has no CLI"),
         }
     }
 
@@ -520,18 +523,25 @@ impl Client {
         let args: &[&str] = match self {
             Self::ClaudeCode => &["mcp", "add", "--transport", "http", "--scope", "user", NAME],
             Self::Codex => &["mcp", "add", NAME, "--url"],
+            Self::Antigravity => unreachable!("Antigravity has no CLI"),
         };
         args.iter().map(|a| a.to_string()).chain([url()]).collect()
     }
 }
 
-/// Whether the client's CLI is on this computer at all.
+/// Whether the client is on this computer at all.
 pub async fn installed(client: Client) -> bool {
-    locate(client.cli()).await.is_some()
+    match client {
+        Client::Antigravity => !antigravity::configs().is_empty(),
+        _ => locate(client.cli()).await.is_some(),
+    }
 }
 
 pub async fn registered(client: Client) -> bool {
-    run_cli(client, &["mcp".into(), "get".into(), NAME.into()]).await.is_ok()
+    match client {
+        Client::Antigravity => antigravity::registered(),
+        _ => run_cli(client, &["mcp".into(), "get".into(), NAME.into()]).await.is_ok(),
+    }
 }
 
 /// Adds this server to the client's user config; nothing to do when it is there already.
@@ -539,7 +549,85 @@ pub async fn register(client: Client) -> Result<()> {
     if registered(client).await {
         return Ok(());
     }
-    run_cli(client, &client.add_args()).await
+    match client {
+        Client::Antigravity => antigravity::register(),
+        _ => run_cli(client, &client.add_args()).await,
+    }
+}
+
+/// T3 Code runs Antigravity with `--gemini-dir <T3 home>/userdata/providers/antigravity/<instance>`,
+/// which reads its MCP servers from `config/mcp_config.json` there. Each provider instance has
+/// its own directory; t3boat goes into all of them.
+mod antigravity {
+    use super::{url, NAME};
+    use anyhow::{bail, Context, Result};
+    use serde_json::{json, Value};
+    use std::path::{Path, PathBuf};
+
+    /// Each instance's `config/mcp_config.json`, existing or not.
+    pub fn configs() -> Vec<PathBuf> {
+        crate::t3desktop::home().map(|h| configs_in(&h)).unwrap_or_default()
+    }
+
+    pub(super) fn configs_in(t3_home: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(t3_home.join("userdata/providers/antigravity")) else {
+            return vec![];
+        };
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path().join("config"))
+            .filter(|c| c.is_dir())
+            .map(|c| c.join("mcp_config.json"))
+            .collect();
+        found.sort();
+        found
+    }
+
+    pub fn registered() -> bool {
+        registered_in(&configs())
+    }
+
+    pub(super) fn registered_in(configs: &[PathBuf]) -> bool {
+        !configs.is_empty()
+            && configs.iter().all(|c| read(c).is_ok_and(|v| v["mcpServers"][NAME]["url"] == url()))
+    }
+
+    pub fn register() -> Result<()> {
+        let configs = configs();
+        if configs.is_empty() {
+            bail!("T3 Code has not set up Antigravity on this computer");
+        }
+        configs.iter().try_for_each(|c| add(c))
+    }
+
+    /// Sets `mcpServers.t3boat`, keeping every other server and setting.
+    pub(super) fn add(config: &Path) -> Result<()> {
+        let mut v = read(config)?;
+        let servers = v
+            .as_object_mut()
+            .context("not a JSON object")?
+            .entry("mcpServers")
+            .or_insert_with(|| json!({}));
+        servers
+            .as_object_mut()
+            .context("mcpServers is not a JSON object")?
+            .insert(NAME.into(), json!({ "url": url() }));
+        let text = serde_json::to_string_pretty(&v)? + "\n";
+        std::fs::write(config, text).with_context(|| format!("writing {}", config.display()))
+    }
+
+    /// A missing or empty file (T3 Code creates it empty) is no servers yet.
+    fn read(config: &Path) -> Result<Value> {
+        let text = match std::fs::read_to_string(config) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", config.display())),
+        };
+        if text.trim().is_empty() {
+            return Ok(json!({}));
+        }
+        serde_json::from_str(&text).with_context(|| format!("{} is not valid JSON", config.display()))
+    }
 }
 
 async fn run_cli(client: Client, args: &[String]) -> Result<()> {
@@ -603,6 +691,35 @@ mod tests {
     async fn rpc(method: &str, params: Value) -> Value {
         let request = json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params });
         dispatch(Arc::new(Echo), request).await.unwrap()
+    }
+
+    #[test]
+    fn antigravity_config_keeps_other_servers() {
+        let home = std::env::temp_dir().join(format!("t3boat-agy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let base = home.join("userdata/providers/antigravity");
+        for (dir, text) in [("a", ""), ("b", r#"{"mcpServers":{"other":{"command":"x"}},"keep":1}"#)] {
+            std::fs::create_dir_all(base.join(dir).join("config")).unwrap();
+            std::fs::write(base.join(dir).join("config/mcp_config.json"), text).unwrap();
+        }
+        // An instance directory without a config directory is not one T3 Code set up.
+        std::fs::create_dir_all(base.join("c")).unwrap();
+        let configs = antigravity::configs_in(&home);
+        assert_eq!(configs.len(), 2);
+        assert!(!antigravity::registered_in(&configs));
+        for c in &configs {
+            antigravity::add(c).unwrap();
+        }
+        assert!(antigravity::registered_in(&configs));
+        let b: Value = serde_json::from_str(&std::fs::read_to_string(&configs[1]).unwrap()).unwrap();
+        assert_eq!(b["mcpServers"]["other"]["command"], "x");
+        assert_eq!(b["mcpServers"]["t3boat"]["url"], url());
+        assert_eq!(b["keep"], 1);
+        assert!(!antigravity::registered_in(&[]));
+        std::fs::write(&configs[0], "not json").unwrap();
+        assert!(antigravity::add(&configs[0]).is_err());
+        assert_eq!(std::fs::read_to_string(&configs[0]).unwrap(), "not json");
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[tokio::test]

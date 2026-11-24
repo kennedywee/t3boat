@@ -51,8 +51,8 @@ interface UiState {
                                    // include machines deleted and sandboxes replaced by a restore in that period
   settings: { startAtLogin: boolean };
   sizes: { id: string; spec: string; hourly: number }[]; // e.g. {id:"small", spec:"2 vCPU · 4 GB", hourly:0.018}
-  mcp: { claudeCode: boolean | null; codex: boolean | null };
-                                   // t3boat registered as an MCP server in that CLI; null = CLI not installed
+  mcp: { claudeCode: boolean | null; codex: boolean | null; antigravity: boolean | null };
+                                   // t3boat registered as an MCP server in that agent; null = agent not installed (Antigravity: T3 Code has not set it up)
                                    // (Settings → "Coding agents" disables its button with a hint)
   githubUploads: { connected: boolean; login: string | null; everything: boolean; code: string | null };
                                    // the user's own GitHub login on machines, for uploads. login: the
@@ -111,7 +111,7 @@ interface MachineDetails {
 | `delete_machine` | `{ id, discard? }` | permanent; UI must confirm first. Rejects while an agent or build works on it, or while its state can't be told yet (e.g. mid-wake); then offer "Delete anyway" = `discard: true`. T3 Code cannot be told to forget a backend, so deleting a paired machine brings T3 Code to the front with a notification naming the entry to remove under Settings → Environments. Its local port is never given to another machine, so that entry can't reach one |
 | `latest_thread` | `{ id }` | → thread id or null: the machine's most recent non-subagent thread; never wakes it. The details footer reads “Open last thread in T3 Code” (“Open T3 Code” if none) and calls `open_machine` with that id |
 | `get_machine_details` | `{ id }` | → `MachineDetails`; should work while asleep (from cache / Boat API, without waking it). Rejection = toast, last data stays |
-| `add_mcp` | `{ client }` | `"claudeCode" \| "codex"`: registers t3boat as an MCP server in that CLI's config so its agents can control t3boat; resolves when done, then `UiState.mcp[client]` is `true` |
+| `add_mcp` | `{ client }` | `"claudeCode" \| "codex" \| "antigravity"`: registers t3boat as an MCP server in that agent's config (Antigravity: every `mcp_config.json` of T3 Code's Antigravity provider) so its agents can control t3boat; resolves when done, then `UiState.mcp[client]` is `true` |
 | `update_settings` | `{ settings }` | full settings object |
 | `connect_github_uploads` | none | "GitHub login": runs this computer's `gh` browser sign-in in a config folder of its own, opens GitHub's device page and shows the code as `UiState.githubUploads.code`; resolves once signed in (up to 15 min). Rejects when `gh` is not installed here |
 | `disconnect_github_uploads` | none | forgets the login and takes it off the machines; the token stays valid on GitHub until revoked there |
