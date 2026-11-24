@@ -593,6 +593,9 @@ mod antigravity {
     }
 
     pub fn register() -> Result<()> {
+        // One at a time: each read-modify-write shares the config's temp file.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let configs = configs();
         if configs.is_empty() {
             bail!("T3 Code has not set up Antigravity on this computer");
