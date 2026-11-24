@@ -45,20 +45,25 @@ struct Ui {
     init_lock: tokio::sync::Mutex<()>,
 }
 
-/// Whether each coding agent CLI has t3boat's MCP server; `None`: that CLI is not installed.
+/// Whether each coding agent has t3boat's MCP server; `None`: that agent is not installed.
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct McpStatus {
     claude_code: Option<bool>,
     codex: Option<bool>,
+    antigravity: Option<bool>,
 }
 
 async fn mcp_status() -> McpStatus {
     let status = |client| async move {
         if mcp::installed(client).await { Some(mcp::registered(client).await) } else { None }
     };
-    let (claude_code, codex) = tokio::join!(status(mcp::Client::ClaudeCode), status(mcp::Client::Codex));
-    McpStatus { claude_code, codex }
+    let (claude_code, codex, antigravity) = tokio::join!(
+        status(mcp::Client::ClaudeCode),
+        status(mcp::Client::Codex),
+        status(mcp::Client::Antigravity)
+    );
+    McpStatus { claude_code, codex, antigravity }
 }
 
 async fn refresh_mcp(handle: &AppHandle) {

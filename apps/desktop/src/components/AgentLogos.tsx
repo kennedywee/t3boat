@@ -1,6 +1,7 @@
 // Coding agents' names, each led by its logo as if part of the word. Claude Code keeps its brand colour;
-// Codex takes the text colour. t3boat is not affiliated with either.
+// Codex takes the text colour; Antigravity's is the image T3 Code shows. t3boat is not affiliated with any.
 import { Fragment, type ComponentType } from "react";
+import antigravity from "./antigravity.png";
 
 function ClaudeCodeLogo() {
   return (
@@ -28,11 +29,20 @@ function CodexLogo() {
   );
 }
 
-/** Keyed by the names the UI shows: Settings' "Claude Code", the backend's "Claude" and "Codex". */
+function AntigravityLogo() {
+  return (
+    <svg viewBox="0 0 128 128" aria-hidden>
+      <image href={antigravity} width="128" height="128" />
+    </svg>
+  );
+}
+
+/** Keyed by the names the UI shows: Settings' "Claude Code", the backend's "Claude", "Codex" and "Antigravity". */
 const LOGOS: Record<string, ComponentType> = {
   Claude: ClaudeCodeLogo,
   "Claude Code": ClaudeCodeLogo,
   Codex: CodexLogo,
+  Antigravity: AntigravityLogo,
 };
 
 export function AgentName({ name }: { name: string }) {

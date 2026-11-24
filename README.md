@@ -57,7 +57,7 @@ Please build and install t3boat (https://github.com/paukraft/t3boat) on my compu
 2. Accept the new backend in T3 Code.
 3. Work in T3 Code as usual. Push or open a PR from the machine.
 
-To let Claude Code or Codex on your computer manage machines, click "Add" next to them in t3boat's settings.
+To let Claude Code, Codex or T3 Code's Antigravity on your computer manage machines, click "Add" next to them in t3boat's settings.
 
 ## Development
 

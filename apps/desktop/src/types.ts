@@ -61,7 +61,7 @@ export interface Size {
   hourly: number;
 }
 
-export type McpClient = "claudeCode" | "codex";
+export type McpClient = "claudeCode" | "codex" | "antigravity";
 
 export interface UiState {
   setup: Setup;
