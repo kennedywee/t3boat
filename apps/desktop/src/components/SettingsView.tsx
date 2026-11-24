@@ -99,7 +99,9 @@ export function SettingsView({
     onConnectUploads().finally(() => setConnecting(false));
   };
 
-  const missing = CLIENTS.filter((c) => state.mcp[c.id] === null).map((c) => c.name);
+  // Antigravity is not installed on its own: T3 Code runs it once turned on in its settings.
+  const missing = CLIENTS.filter((c) => c.id !== "antigravity" && state.mcp[c.id] === null).map((c) => c.name);
+  const antigravityOff = state.mcp.antigravity === null;
 
   const change = (p: Partial<Settings>) => {
     const next = { ...s, ...p };
@@ -219,9 +221,19 @@ export function SettingsView({
             })}
           </div>
           <span className="hint">
-            {missing.length ? (
+            {missing.length || antigravityOff ? (
               <>
-                <AgentNames names={missing} /> {missing.length === 1 ? "isn't" : "aren't"} installed on this computer
+                {missing.length ? (
+                  <>
+                    <AgentNames names={missing} /> {missing.length === 1 ? "isn't" : "aren't"} installed on this computer
+                    {antigravityOff ? ". " : null}
+                  </>
+                ) : null}
+                {antigravityOff ? (
+                  <>
+                    Turn on <AgentName name="Antigravity" /> in T3 Code's settings first
+                  </>
+                ) : null}
               </>
             ) : (
               "Their agents can then create, wake and send work to machines"

@@ -613,7 +613,7 @@ mod antigravity {
             .context("mcpServers is not a JSON object")?
             .insert(NAME.into(), json!({ "url": url() }));
         let text = serde_json::to_string_pretty(&v)? + "\n";
-        std::fs::write(config, text).with_context(|| format!("writing {}", config.display()))
+        crate::store::write_private(config, text.as_bytes()).with_context(|| format!("writing {}", config.display()))
     }
 
     /// A missing or empty file (T3 Code creates it empty) is no servers yet.
