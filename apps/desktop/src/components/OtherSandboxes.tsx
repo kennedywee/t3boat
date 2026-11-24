@@ -4,6 +4,7 @@ import { seedOf } from "../machine";
 import type { BoatSandbox, MachineState } from "../types";
 import { BoatIcon } from "./BoatIcon";
 import { Dots } from "./common";
+import { Icon } from "./Icons";
 
 /** How often the list is read again while it is on screen. */
 const REFRESH_MS = 30_000;
@@ -14,6 +15,17 @@ function iconState(state: string): MachineState {
   if (state === "stopping") return "sleeping";
   if (state === "starting" || state === "resuming") return "waking";
   return "idle";
+}
+
+/** Where the choice to collapse the section is kept: it outlasts the panel and the app. */
+const COLLAPSED_KEY = "t3boat.others.collapsed";
+
+function readCollapsed(): boolean {
+  try {
+    return localStorage.getItem(COLLAPSED_KEY) === "1";
+  } catch {
+    return false; // no storage: the section opens expanded
+  }
 }
 
 const running = (s: BoatSandbox) => s.state !== "stopped" && s.state !== "stopping";
@@ -31,11 +43,24 @@ interface Props {
 /**
  * The Boat account's sandboxes that are not machines on this computer. One made with the Boat
  * CLI or website can only be started and stopped. A t3boat machine that another computer
- * created can be added here. Hidden when there are none.
+ * created can be added here. Its header collapses it to that one line, which keeps the count.
+ * Hidden when there are none.
  */
 export function OtherSandboxes({ onError }: Props) {
   const [list, setList] = useState<BoatSandbox[]>([]);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [collapsed, setCollapsed] = useState(readCollapsed);
+
+  const flip = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    try {
+      if (next) localStorage.setItem(COLLAPSED_KEY, "1");
+      else localStorage.removeItem(COLLAPSED_KEY);
+    } catch {
+      // not remembered this time
+    }
+  };
 
   const load = useCallback(() => {
     call("other_sandboxes", undefined).then(setList, () => {
@@ -73,13 +98,16 @@ export function OtherSandboxes({ onError }: Props) {
 
   return (
     <section className="others" aria-label="Other Boat sandboxes">
-      <div className="list-head">
+      <button className="list-head others-head" aria-expanded={!collapsed} aria-controls="others-list" onClick={flip}>
         <span className="caption">
           other boat sandboxes <span className="count">{list.length}</span>
         </span>
-        <span className="caption others-note">not on this computer</span>
-      </div>
-      <ul className="list others-list">
+        <span className="caption others-note">
+          not on this computer
+          <Icon name="chevron" size={8} />
+        </span>
+      </button>
+      <ul id="others-list" className="list others-list" hidden={collapsed}>
         {list.map((s) => {
           const on = running(s);
           return (
