@@ -60,15 +60,23 @@ fi
 # on PATH in ~/.profile (login shells, interactive or not) and ~/.bashrc (interactive shells: past
 # its guard, so T3's terminals). T3 reads PATH from `bash -ilc` as it starts, so a change here
 # restarts it, and its agents find the tools.
+# t3boat's own processes keep the image's tools: a `node` the user picked with mise (an old one,
+# say) must not break the watchdog or the `node -e` calls here. They set T3BOAT_NO_MISE=1 (the
+# watchdog's unit, and every `boat exec` of the app), and the block below then leaves PATH alone.
 if [ ! -x "$HOME/.local/bin/mise" ]; then
   curl -fsSL https://mise.run | MISE_INSTALL_PATH="$HOME/.local/bin/mise" sh >"$boat_dir/mise-install.log" 2>&1 \
     || echo "mise install failed: see $boat_dir/mise-install.log" >&2
 fi
 mise_path='# t3boat mise START
-case ":$PATH:" in *":$HOME/.local/share/mise/shims:"*) ;; *) export PATH="$HOME/.local/share/mise/shims:$PATH" ;; esac
+if [ -z "${T3BOAT_NO_MISE:-}" ]; then
+  case ":$PATH:" in *":$HOME/.local/share/mise/shims:"*) ;; *) export PATH="$HOME/.local/share/mise/shims:$PATH" ;; esac
+fi
 # t3boat mise END'
 for rc in "$HOME/.profile" "$HOME/.bashrc"; do
-  if ! grep -qF '# t3boat mise START' "$rc" 2>/dev/null; then
+  current="$(sed -n '/^# t3boat mise START$/,/^# t3boat mise END$/p' "$rc" 2>/dev/null || true)"
+  if [ "$current" != "$mise_path" ]; then
+    # An older version of the block is replaced, not added to.
+    [ -z "$current" ] || sed -i '/^# t3boat mise START$/,/^# t3boat mise END$/d' "$rc"
     printf '\n%s\n' "$mise_path" >>"$rc"
     restart_t3=1
   fi
@@ -116,6 +124,7 @@ Description=t3boat watchdog: stops this sandbox when idle
 After=t3code.service
 
 [Service]
+Environment=T3BOAT_NO_MISE=1
 ExecStart=/bin/bash -lc 'exec node --no-warnings %h/.t3boat/watchdog.mjs'
 Restart=always
 RestartSec=5
