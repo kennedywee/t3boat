@@ -646,6 +646,7 @@ async fn update_settings(handle: AppHandle, ui: State<'_, Ui>, mut settings: Set
         ),
         None => None,
     };
+    settings.mothership_id = settings.mothership_id.map(|id| id.trim().to_owned()).filter(|id| !id.is_empty());
     if app.settings().start_at_login != settings.start_at_login {
         apply_autostart(&handle, settings.start_at_login).map_err(|e| format!("Couldn't change start at login: {e}"))?;
     }

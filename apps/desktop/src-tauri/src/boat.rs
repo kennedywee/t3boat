@@ -80,6 +80,9 @@ const TRIAL_REFUSAL: &str = "trial_auto_stop_required";
 /// The longest auto-stop Boat's free trial allows (2 hours); `watchdog.mjs` renews it.
 const TRIAL_TTL_SECS: &str = "7200";
 
+/// Sandbox states of one that runs or is on its way up.
+const AWAKE: &[&str] = &["ready", "idle", "running", "provisioned", "cloning", "resuming", "starting"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resume {
     Resumed,
@@ -204,6 +207,11 @@ impl Boat {
         self.run(&["stop", id], Duration::from_secs(120)).await.map(drop)
     }
 
+    /// Stops the sandbox this runs on, as a machine's watchdog does with `boat stop self`.
+    pub async fn stop_self(&self) -> Result<()> {
+        self.stop("self").await
+    }
+
     /// Gone only when Boat's own list confirms it: one bad answer must not retire a machine.
     pub async fn confirmed_gone(&self, id: &str) -> bool {
         matches!(self.list().await, Ok(l) if l.iter().all(|s| s.id != id))
@@ -211,8 +219,24 @@ impl Boat {
 
     /// Resumes onto `size`, which is how a machine changes size.
     pub async fn resume(&self, id: &str, size: &str) -> Result<Resume> {
-        let (ok, stdout, stderr) =
-            self.output_without_auto_stop(&["resume", id, "--type", size], Duration::from_secs(300)).await?;
+        self.resume_with(&["resume", id, "--type", size]).await
+    }
+
+    /// Resumes a sandbox that puts itself to sleep, such as a mothership running `t3boatd
+    /// --auto-sleep`: on its own size and without Boat's auto-stop. One that already runs or
+    /// wakes is fine.
+    pub async fn wake(&self, id: &str) -> Result<Resume> {
+        match self.resume_with(&["resume", id]).await {
+            Err(e) if self.info(id).await.is_ok_and(|s| AWAKE.contains(&s.state.as_str())) => {
+                tracing::debug!("{id} is already awake: {e:#}");
+                Ok(Resume::Resumed)
+            }
+            result => result,
+        }
+    }
+
+    async fn resume_with(&self, args: &[&str]) -> Result<Resume> {
+        let (ok, stdout, stderr) = self.output_without_auto_stop(args, Duration::from_secs(300)).await?;
         let said = said(&stdout, &stderr);
         match ok {
             true => Ok(Resume::Resumed),

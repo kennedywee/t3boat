@@ -160,6 +160,9 @@ pub struct Settings {
     /// This computer's Tailscale MagicDNS name (`mybox.tailnet.ts.net`). The proxies answer
     /// requests addressed to it as well as loopback ones, with stricter auth. `None`: loopback only.
     pub tailscale_host: Option<String>,
+    /// The Boat sandbox that runs `t3boatd --auto-sleep` for the user's machines. This app wakes
+    /// it as it starts. `None`: no mothership.
+    pub mothership_id: Option<String>,
 }
 
 /// The user's own GitHub login, which machines use for `gh` uploads, or with `everything` for all
@@ -176,7 +179,7 @@ pub struct GithubUploads {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { start_at_login: true, fleet_repo: None, tailscale_host: None }
+        Self { start_at_login: true, fleet_repo: None, tailscale_host: None, mothership_id: None }
     }
 }
 

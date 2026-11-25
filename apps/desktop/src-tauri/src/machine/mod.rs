@@ -142,6 +142,9 @@ pub struct Shared {
     pub http: reqwest::Client,
     /// Names this running app to a machine's watchdog, which may hear from several computers.
     pub client: String,
+    /// When a client last used any machine through this app: a paired device, an agent over
+    /// MCP. Starts at the app's start.
+    pub last_client_activity: Mutex<Instant>,
 }
 
 impl Shared {
@@ -162,6 +165,14 @@ impl Shared {
     }
     pub fn notify(&self, title: impl Into<String>, body: impl Into<String>) {
         let _ = self.events.send(Event::Notify { title: title.into(), body: body.into() });
+    }
+    /// A client used this app just now.
+    pub fn touch_activity(&self) {
+        *self.last_client_activity.lock().unwrap() = Instant::now();
+    }
+    /// Since the last client activity, or since the start if none.
+    pub fn idle_for(&self) -> Duration {
+        self.last_client_activity.lock().unwrap().elapsed()
     }
 }
 
@@ -321,17 +332,19 @@ impl MachineRuntime {
     }
 
     pub fn save_cache(&self) {
-        // Serialized and written under the lock: one writer at a time for the file.
-        let result = {
-            let cache = self.cache.lock().unwrap();
-            if self.power() == Power::Missing {
-                return;
-            }
-            cache.to_bytes().and_then(|b| crate::store::write_private(&cache::cache_path(&self.dir), &b))
-        };
-        if let Err(e) = result {
+        if let Err(e) = self.try_save_cache() {
             tracing::warn!("saving cache for {}: {e:#}", self.id());
         }
+    }
+
+    pub fn try_save_cache(&self) -> Result<()> {
+        // Serialized and written under the lock: one writer at a time for the file.
+        let cache = self.cache.lock().unwrap();
+        if self.power() == Power::Missing {
+            return Ok(());
+        }
+        let bytes = cache.to_bytes()?;
+        crate::store::write_private(&cache::cache_path(&self.dir), &bytes)
     }
 
     fn follow_size(&self, sb: &crate::boat::Sandbox) {
@@ -758,6 +771,7 @@ impl MachineRuntime {
 
     /// Someone used the machine in a way that changes nothing T3 Code shows: it stays awake.
     pub fn used(self: &Arc<Self>) {
+        self.shared.touch_activity();
         if self.power() != Power::Running {
             return;
         }
@@ -1151,9 +1165,18 @@ impl MachineRuntime {
     /// wakes for it as an always-on server would run it. Only work due after it went to sleep:
     /// what came due while it ran had its chance.
     pub fn scheduled_wake(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.scheduled_wake_for(self.power())
+    }
+
+    /// Same as `scheduled_wake`, using a caller-captured `power` reading so callers inspecting
+    /// both power and scheduled wake observe one consistent state.
+    pub fn scheduled_wake_for(&self, power: Power) -> Option<chrono::DateTime<chrono::Utc>> {
+        if power != Power::Stopped {
+            return None;
+        }
         let due = chrono::DateTime::from_timestamp_millis(self.record.read().unwrap().next_due_at?)?;
         let stopped_at = (*self.stopped_at.lock().unwrap())?;
-        (self.power() == Power::Stopped && due > stopped_at).then_some(due)
+        (due > stopped_at).then_some(due)
     }
 
     /// A message T3 Code was told is sent, still queued on a sleeping machine: its wake failed

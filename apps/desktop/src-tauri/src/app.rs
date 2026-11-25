@@ -3,6 +3,7 @@
 
 use crate::boat::{Boat, Resume, Starts};
 use crate::machine::{provision, Event, MachineRuntime, Power, Shared, WatchdogPhase};
+use crate::mothership::ActivitySnapshot;
 use crate::proxy;
 use crate::store::{GithubUploads, Settings, Spend, State, Store};
 use crate::t3desktop::T3Desktop;
@@ -197,6 +198,7 @@ impl App {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             client: proxy::auth::random_token(),
+            last_client_activity: Mutex::new(std::time::Instant::now()),
         });
         let app = Arc::new(Self {
             shared,
@@ -220,7 +222,34 @@ impl App {
         }
         app.serve_on_tailnet(app.ports(), true, false);
         tokio::spawn(app.clone().delete_leftover_sandboxes());
+        #[cfg(feature = "desktop")]
+        if let Some(id) = state.settings.mothership_id {
+            tokio::spawn(wake_mothership(app.shared.boat.clone(), id));
+        }
         Ok(app)
+    }
+
+    /// What the machines and clients do now: whether a mothership running this app may sleep.
+    pub fn activity(&self) -> ActivitySnapshot {
+        let machines = self.machines();
+        let now_secs = chrono::Utc::now().timestamp();
+        let mut any_worker_active = !self.creating.lock().unwrap().is_empty();
+        let mut next_due_in_secs: Option<i64> = None;
+        for m in &machines {
+            let power = m.power();
+            if !matches!(power, Power::Stopped | Power::Missing) {
+                any_worker_active = true;
+            }
+            if let Some(due) = m.scheduled_wake_for(power) {
+                let secs = due.timestamp() - now_secs;
+                next_due_in_secs = Some(next_due_in_secs.map_or(secs, |cur| cur.min(secs)));
+            }
+        }
+        ActivitySnapshot {
+            any_worker_active,
+            next_due_in_secs,
+            idle_for_secs: self.shared.idle_for().as_secs(),
+        }
     }
 
     async fn delete_leftover_sandboxes(self: Arc<Self>) {
@@ -323,6 +352,21 @@ impl App {
 
     /// Only the event loop calls this on `Event::Persist`: one writer for the state file.
     pub fn save(&self) {
+        if let Err(e) = self.try_save_state() {
+            tracing::error!("saving state: {e:#}");
+        }
+    }
+
+    /// Saves app state and every machine's cache, returning an error if any write fails.
+    pub fn try_save(&self) -> Result<()> {
+        self.try_save_state()?;
+        for m in self.machines() {
+            m.try_save_cache()?;
+        }
+        Ok(())
+    }
+
+    fn try_save_state(&self) -> Result<()> {
         // One lock at a time: a guard in a field initializer would live until the end of the `let`.
         let spend = self.spend.lock().unwrap().clone();
         let retired_ports = self.retired_ports.lock().unwrap().clone();
@@ -339,9 +383,7 @@ impl App {
             pending_sandboxes,
             pending_unexpose_ports,
         };
-        if let Err(e) = self.store.save(&state) {
-            tracing::error!("saving state: {e:#}");
-        }
+        self.store.save(&state)
     }
 
     /// A Tailscale name set or changed puts every machine on the tailnet; one cleared takes them off.
@@ -913,6 +955,16 @@ impl App {
         }
         self.shared.persist();
         self.shared.changed();
+    }
+}
+
+/// Best effort: a mothership that does not wake only means the machines it runs wait.
+#[cfg(feature = "desktop")]
+async fn wake_mothership(boat: Boat, id: String) {
+    match boat.wake(&id).await {
+        Ok(Resume::Resumed) => tracing::info!("mothership {id} is awake"),
+        Ok(Resume::DataExpired) => tracing::warn!("mothership {id}: Boat deleted its disk after 14 days asleep"),
+        Err(e) => tracing::warn!("waking mothership {id}: {e:#}"),
     }
 }
 

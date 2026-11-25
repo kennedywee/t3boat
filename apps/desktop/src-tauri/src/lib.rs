@@ -5,6 +5,7 @@ pub mod machine;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod linux_tray;
 pub mod mcp;
+pub mod mothership;
 #[cfg(feature = "desktop")]
 mod omarchy;
 pub mod process;

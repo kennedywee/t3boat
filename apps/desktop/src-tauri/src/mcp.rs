@@ -450,6 +450,7 @@ impl Call {
 
 impl Tools for App {
     async fn call(self: Arc<Self>, call: Call) -> Result<String> {
+        self.shared.touch_activity();
         let pending = call.pending();
         let (tx, rx) = tokio::sync::oneshot::channel();
         // Detached, so a client that gives up does not cancel the work halfway.

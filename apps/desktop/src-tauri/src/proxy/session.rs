@@ -249,6 +249,12 @@ impl Session {
         let tag = req["tag"].as_str().unwrap_or_default().to_owned();
         tracing::debug!(phase = ?self.phase, "rpc {tag}");
         let action = classify::is_user_action(&tag, &req["payload"]);
+        let interacting = tag == "server.reportClientActivity"
+            && req["payload"]["recentlyInteracted"].as_bool() == Some(true);
+        let opening_chat = tag == "orchestration.subscribeThread";
+        if action || interacting || opening_chat {
+            self.m.shared.touch_activity();
+        }
         match self.phase {
             // A machine about to freeze must not take new work: wait for it, then resume it on
             // a fresh upstream.
