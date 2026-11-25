@@ -529,3 +529,25 @@ button.row-name {
     opacity: 0.45;
   }
 }
+
+/* pairing a phone over the tailnet */
+.pair-qr {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding-top: 10px;
+}
+.pair-qr img {
+  align-self: center;
+  width: 168px;
+  height: 168px;
+  /* one SVG unit per module: scale crisp, never blurred */
+  image-rendering: pixelated;
+  background: #fff;
+}
+.pair-qr .port-share {
+  padding-bottom: 4px;
+}
+.line .btn-link.is-danger {
+  color: var(--danger);
+}

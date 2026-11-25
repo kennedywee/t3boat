@@ -10,6 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -18,6 +19,9 @@ use tokio::task::JoinHandle;
 const FIRST_PORT: u16 = 47731;
 /// Machines ever created here: deleted ones keep their port.
 const PORTS: u16 = 1000;
+/// Between tries to remove Tailscale Serve handlers that failed to go, such as while Tailscale
+/// is stopped.
+const UNEXPOSE_RETRY: Duration = Duration::from_secs(60);
 
 /// Why the app cannot run yet, in the order the user has to fix it.
 #[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
@@ -142,6 +146,28 @@ pub struct App {
     retired_ports: Mutex<Vec<u16>>,
     /// Sandboxes of creates the app didn't live to finish, until deleted.
     leftover_sandboxes: Mutex<Vec<String>>,
+    /// Tailscale Serve ports whose removal failed and is still pending retry.
+    pending_unexpose_ports: Mutex<std::collections::HashSet<u16>>,
+    /// The one task retrying `pending_unexpose_ports`.
+    unexpose_retry: SingleFlight,
+}
+
+/// At most one background job of a kind at a time.
+#[derive(Default)]
+struct SingleFlight(AtomicBool);
+
+impl SingleFlight {
+    /// Whether the caller now runs the job: false while another task runs it.
+    fn start(&self) -> bool {
+        !self.0.swap(true, Ordering::AcqRel)
+    }
+
+    /// Ends the job. `true` when `more` work came in as it ended and no other task took it: the
+    /// caller then keeps the job.
+    fn finish(&self, more: impl FnOnce() -> bool) -> bool {
+        self.0.store(false, Ordering::Release);
+        more() && self.start()
+    }
 }
 
 impl App {
@@ -182,10 +208,17 @@ impl App {
             spend: Mutex::new(state.spend),
             retired_ports: Mutex::new(state.retired_ports),
             leftover_sandboxes: Mutex::new(leftover),
+            pending_unexpose_ports: Mutex::new(state.pending_unexpose_ports),
+            unexpose_retry: SingleFlight::default(),
         });
         for record in state.machines {
             app.spawn(app.runtime(record));
         }
+        let pending_unexpose: Vec<u16> = app.pending_unexpose_ports.lock().unwrap().iter().copied().collect();
+        if !pending_unexpose.is_empty() {
+            app.serve_on_tailnet(pending_unexpose, false, false);
+        }
+        app.serve_on_tailnet(app.ports(), true, false);
         tokio::spawn(app.clone().delete_leftover_sandboxes());
         Ok(app)
     }
@@ -296,6 +329,7 @@ impl App {
         let creating: Vec<_> = self.creating.lock().unwrap().iter().filter_map(|c| c.sandbox.clone()).collect();
         let mut pending_sandboxes = self.leftover_sandboxes.lock().unwrap().clone();
         pending_sandboxes.extend(creating);
+        let pending_unexpose_ports = self.pending_unexpose_ports.lock().unwrap().clone();
         let state = State {
             machines: self.machines().iter().map(|m| m.record()).collect(),
             settings: self.settings(),
@@ -303,15 +337,120 @@ impl App {
             spend,
             retired_ports,
             pending_sandboxes,
+            pending_unexpose_ports,
         };
         if let Err(e) = self.store.save(&state) {
             tracing::error!("saving state: {e:#}");
         }
     }
 
-    pub fn update_settings(&self, settings: Settings) {
-        *self.shared.settings.write().unwrap() = settings;
+    /// A Tailscale name set or changed puts every machine on the tailnet; one cleared takes them off.
+    pub fn update_settings(self: &Arc<Self>, settings: Settings) {
+        let host = settings.tailscale_host.clone();
+        let old = std::mem::replace(&mut *self.shared.settings.write().unwrap(), settings).tailscale_host;
         self.shared.persist();
+        let pending: Vec<u16> = self.pending_unexpose_ports.lock().unwrap().iter().copied().collect();
+        if !pending.is_empty() {
+            self.serve_on_tailnet(pending, false, false);
+        }
+        match (old, host) {
+            (old, Some(host)) if old.as_ref() != Some(&host) => self.serve_on_tailnet(self.ports(), true, true),
+            (Some(_), None) => self.serve_on_tailnet(self.ports(), false, false),
+            _ => {}
+        }
+    }
+
+    /// The local ports of all machines.
+    fn ports(&self) -> Vec<u16> {
+        self.machines().iter().map(|m| m.record().local_port).collect()
+    }
+
+    /// Whether `port` should currently be served on the tailnet.
+    fn should_expose_port(&self, port: u16) -> bool {
+        self.settings().tailscale_host.is_some()
+            && self.machines().iter().any(|m| m.record().local_port == port)
+    }
+
+    /// Serves `ports` on the tailnet with Tailscale Serve (`on`), or stops, in the background:
+    /// Tailscale may be missing or slow, and nothing waits on it. Does nothing without a Tailscale
+    /// name when turning on. `tell`: a failure notifies the user once per batch, else it is only
+    /// logged. Failed removals stay persisted in `pending_unexpose_ports` and are retried by
+    /// `retry_unexpose`.
+    fn serve_on_tailnet(self: &Arc<Self>, ports: Vec<u16>, on: bool, tell: bool) {
+        if ports.is_empty() || (on && self.settings().tailscale_host.is_none()) {
+            return;
+        }
+        if !on {
+            let mut pending = self.pending_unexpose_ports.lock().unwrap();
+            let before = pending.len();
+            pending.extend(ports.iter().copied());
+            let changed = pending.len() != before;
+            drop(pending);
+            if changed {
+                self.shared.persist();
+            }
+        }
+        let app = self.clone();
+        tokio::spawn(async move {
+            let mut notified = false;
+            let mut removal_failed = false;
+            for port in ports {
+                let result = match on {
+                    true => crate::tailscale::expose_port_if(port, || app.should_expose_port(port)).await,
+                    false => crate::tailscale::unexpose_port_if(port, || !app.should_expose_port(port)).await,
+                };
+                match result {
+                    // Removed, skipped as wanted again, or served on purpose: no removal is due.
+                    Ok(done) if done || !on => app.forget_pending_unexpose(port),
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("tailscale serve on port {port}: {e:#}");
+                        removal_failed |= !on;
+                        if tell && !notified {
+                            notified = true;
+                            app.shared.notify("Machines aren't on your tailnet", format!("{e:#}"));
+                        }
+                    }
+                }
+            }
+            if removal_failed {
+                app.retry_unexpose();
+            }
+        });
+    }
+
+    /// `port` has no Serve handler left to remove.
+    fn forget_pending_unexpose(&self, port: u16) {
+        if self.pending_unexpose_ports.lock().unwrap().remove(&port) {
+            self.shared.persist();
+        }
+    }
+
+    /// Retries `pending_unexpose_ports` every `UNEXPOSE_RETRY` in one background task, until none
+    /// is left: otherwise a handler that failed to go, such as while Tailscale was stopped, stays
+    /// on the tailnet until the next settings save or launch.
+    fn retry_unexpose(self: &Arc<Self>) {
+        if !self.unexpose_retry.start() {
+            return;
+        }
+        let app = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(UNEXPOSE_RETRY).await;
+                let ports: Vec<u16> = app.pending_unexpose_ports.lock().unwrap().iter().copied().collect();
+                for port in ports {
+                    match crate::tailscale::unexpose_port_if(port, || !app.should_expose_port(port)).await {
+                        // Skipped: the port is wanted on the tailnet again, so its handler stays.
+                        Ok(_) => app.forget_pending_unexpose(port),
+                        Err(e) => tracing::debug!("retrying tailscale serve removal on port {port}: {e:#}"),
+                    }
+                }
+                let none_left = || app.pending_unexpose_ports.lock().unwrap().is_empty();
+                if none_left() && !app.unexpose_retry.finish(|| !none_left()) {
+                    return;
+                }
+            }
+        });
     }
 
     /// `None`: not connected. `Some(None)`: connected, login name unknown.
@@ -420,6 +559,7 @@ impl App {
                 tracing::warn!("priming {}: {e:#}", machine.id());
             }
             self.spawn(machine.clone());
+            self.serve_on_tailnet(vec![port], true, false);
             Ok::<_, anyhow::Error>(machine)
         }
         .await;
@@ -537,6 +677,7 @@ impl App {
                 tracing::warn!("priming {}: {e:#}", machine.id());
             }
             self.spawn(machine.clone());
+            self.serve_on_tailnet(vec![port], true, false);
             Ok::<_, anyhow::Error>(machine)
         }
         .await;
@@ -601,10 +742,31 @@ impl App {
         open_url(&format!("t3code://pair?pairingUrl={}", urlencoding::encode(&pairing_url)))
     }
 
+    /// A one-time pairing URL for a phone or another device on the tailnet: puts the machine on
+    /// the tailnet first. Replaces any pairing code not yet used.
+    pub async fn pair_tailnet(&self, machine: &MachineRuntime) -> Result<String> {
+        let host = self
+            .settings()
+            .tailscale_host
+            .as_deref()
+            .and_then(crate::store::normalize_tailscale_host)
+            .context("Set this computer's Tailscale name in Settings first")?;
+        let record = machine.record();
+        let exposed = crate::tailscale::expose_port_if(record.local_port, || self.should_expose_port(record.local_port))
+            .await
+            .with_context(|| format!("Tailscale Serve couldn't put {} on your tailnet", record.name))?;
+        if !exposed {
+            anyhow::bail!("Tailscale access was turned off or {} was deleted", record.name);
+        }
+        self.forget_pending_unexpose(record.local_port);
+        let code = machine.auth.new_pairing_code();
+        Ok(crate::tailscale::tailnet_pairing_url(&host, record.local_port, &code))
+    }
+
     /// Refuses while work runs on the machine, unless `discard`. T3 Code offers no way to remove
     /// a backend from outside, so a paired machine ends with T3 Code in front and a note on what
     /// to remove there.
-    pub async fn delete_machine(&self, machine: &MachineRuntime, discard: bool) -> Result<()> {
+    pub async fn delete_machine(self: &Arc<Self>, machine: &MachineRuntime, discard: bool) -> Result<()> {
         // Boat can't report a deleted sandbox's usage: the last chance to count its tail.
         let (day, month) = periods();
         self.refresh_spend(machine, day, month).await;
@@ -641,6 +803,9 @@ impl App {
         }
         let _ = std::fs::remove_dir_all(machine.dir());
         self.retired_ports.lock().unwrap().push(record.local_port);
+        if self.settings().tailscale_host.is_some() {
+            self.serve_on_tailnet(vec![record.local_port], false, false);
+        }
         if let Err(e) = self.shared.t3.unlink(&record.environment_id).await {
             tracing::warn!("unlinking {id} from T3 Code: {e:#}");
         }
@@ -973,5 +1138,17 @@ mod tests {
         assert_eq!((later_day.today, later_day.awake_secs_today, later_day.month), (0.0, 0, 5.0));
         let later_month = super::usage(&spend, 300, 300);
         assert_eq!((later_month.today, later_month.month), (0.0, 0.0));
+    }
+
+    #[test]
+    fn single_flight_runs_one_job_and_keeps_late_work() {
+        let job = super::SingleFlight::default();
+        assert!(job.start());
+        assert!(!job.start(), "a second task must not start while one runs");
+        assert!(!job.finish(|| false), "no work left: the job ends");
+        assert!(job.start(), "an ended job can start again");
+        assert!(job.finish(|| true), "late work: the ending task keeps the job");
+        assert!(!job.start(), "the kept job still blocks others");
+        assert!(!job.finish(|| false));
     }
 }

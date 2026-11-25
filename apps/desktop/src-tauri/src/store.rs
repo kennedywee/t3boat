@@ -309,6 +309,10 @@ pub struct State {
     /// Sandboxes of creates still running: deleted at the next start if the app quit or crashed
     /// before the create finished.
     pub pending_sandboxes: Vec<String>,
+    /// Tailscale Serve HTTPS ports whose removal failed (e.g. Tailscale was stopped) and should be
+    /// retried on startup or when Tailscale becomes available.
+    #[serde(default)]
+    pub pending_unexpose_ports: HashSet<u16>,
 }
 
 pub struct Store {

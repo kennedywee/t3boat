@@ -496,6 +496,31 @@ async fn pair_machine(ui: State<'_, Ui>, id: String) -> Res {
     app.pair(&machine).map_err(err)
 }
 
+/// This computer's Tailscale MagicDNS name; null when Tailscale is missing or stopped.
+#[tauri::command]
+async fn detect_tailscale_host() -> Res<Option<String>> {
+    Ok(crate::tailscale::detect_host().await)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TailnetPairing {
+    /// One-time: opening it pairs one device.
+    url: String,
+    /// `url` as a QR code, an `<svg>` element.
+    svg: String,
+}
+
+/// Puts the machine on the tailnet and returns a one-time pairing URL for a phone, with its QR code.
+#[tauri::command]
+async fn pair_machine_tailnet(ui: State<'_, Ui>, id: String) -> Res<TailnetPairing> {
+    let app = ui.app()?;
+    let machine = app.machine(&id).map_err(err)?;
+    let url = app.pair_tailnet(&machine).await.map_err(err)?;
+    let svg = crate::tailscale::qr_svg(&url).map_err(err)?;
+    Ok(TailnetPairing { url, svg })
+}
+
 /// The id of the thread "Open" goes to; never wakes the machine.
 #[tauri::command]
 async fn latest_thread(ui: State<'_, Ui>, id: String) -> Res<Option<String>> {
@@ -755,6 +780,8 @@ pub fn run() {
             sleep_machine,
             open_machine,
             pair_machine,
+            pair_machine_tailnet,
+            detect_tailscale_host,
             list_client_tokens,
             revoke_client_token,
             delete_machine,

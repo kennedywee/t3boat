@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { call, errorText } from "../api";
 import type { McpClient, Settings, UiState } from "../types";
 import { AgentName, AgentNames } from "./AgentLogos";
 import { Icon } from "./Icons";
@@ -44,6 +45,78 @@ function FleetRepo({ value, onSave }: { value: string; onSave: (repo: string) =>
         {valid
           ? "Skills and agent setup every machine clones and installs once. To update a machine, ask an agent on it for a fleet sync. Empty: none."
           : "Use a GitHub owner/name, like kennedywee/fleet."}
+      </span>
+    </div>
+  );
+}
+
+/** A Tailscale MagicDNS machine name (mybox.tailnet.ts.net), as the backend accepts it. */
+const TAILSCALE_LABEL = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
+const TAILSCALE_RE = new RegExp(`^${TAILSCALE_LABEL}\\.${TAILSCALE_LABEL}\\.ts\\.net\\.?$`, "i");
+
+/** Saved on Enter, when the field loses focus, or once detected: each change serves the machines on the tailnet. */
+function TailscaleHost({ value, onSave }: { value: string; onSave: (host: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  const [detecting, setDetecting] = useState(false);
+  const [detectError, setDetectError] = useState<string | null>(null);
+  const host = draft.trim();
+  const valid = host === "" || TAILSCALE_RE.test(host);
+  const commit = (next = host) => {
+    if ((next === "" || TAILSCALE_RE.test(next)) && next !== valueRef.current) onSaveRef.current(next);
+  };
+  const detect = () => {
+    setDetecting(true);
+    setDetectError(null);
+    call("detect_tailscale_host", undefined)
+      .then(
+        (found) => {
+          if (!found) return setDetectError("Tailscale isn't running on this computer, or has no MagicDNS name.");
+          setDraft(found);
+          commit(found);
+        },
+        (e) => setDetectError(errorText(e)),
+      )
+      .finally(() => setDetecting(false));
+  };
+  return (
+    <div className="setting field">
+      <span className="caption">tailscale</span>
+      <label className="setting-name" htmlFor="tailscale-host">
+        Tailscale name
+      </label>
+      <span className="prompt-input">
+        <span className="prompt-sign" aria-hidden>
+          ts
+        </span>
+        <input
+          id="tailscale-host"
+          value={draft}
+          placeholder="mybox.tailnet.ts.net"
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setDetectError(null);
+          }}
+          onBlur={() => commit()}
+          onKeyDown={(e) => e.key === "Enter" && commit()}
+          spellCheck={false}
+          autoComplete="off"
+          aria-invalid={!valid}
+          aria-describedby="tailscale-host-hint"
+        />
+        <button className="btn btn-link" disabled={detecting} aria-busy={detecting} onClick={detect}>
+          {detecting ? <Dots /> : "Detect"}
+        </button>
+      </span>
+      <span id="tailscale-host-hint" className={`hint${valid && !detectError ? "" : " is-error"}`} aria-live="polite">
+        {detectError ??
+          (valid
+            ? "This computer's name on your tailnet. Machines are then served there with Tailscale Serve, and a phone pairs from a machine's page. Empty: this computer only."
+            : "Use this computer's MagicDNS name, like mybox.tail1234.ts.net.")}
       </span>
     </div>
   );
@@ -127,6 +200,7 @@ export function SettingsView({
           />
         </label>
         <FleetRepo value={s.fleetRepo ?? ""} onSave={(repo) => change({ fleetRepo: repo || null })} />
+        <TailscaleHost value={s.tailscaleHost ?? ""} onSave={(host) => change({ tailscaleHost: host || null })} />
         <div className="setting">
           <span className="caption">github</span>
           <span className="setting-name">GitHub login</span>
