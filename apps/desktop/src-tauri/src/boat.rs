@@ -257,9 +257,11 @@ impl Boat {
     pub async fn exec(&self, id: &str, script: &str, timeout_secs: u64) -> Result<ExecResult> {
         let t = timeout_secs.to_string();
         // The CLI exits with the command's code; its JSON result is what matters.
+        // T3BOAT_NO_MISE keeps the image's tools on PATH: t3boat's scripts run the image's
+        // `node`, not one the user picked with mise (see provision.sh).
         let (_, stdout, stderr) = self
             .output(
-                &["exec", id, "--timeout", &t, "--", "bash", "-lc", script],
+                &["exec", id, "--timeout", &t, "--", "env", "T3BOAT_NO_MISE=1", "bash", "-lc", script],
                 Duration::from_secs(timeout_secs + 60),
             )
             .await?;
