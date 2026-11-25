@@ -335,6 +335,7 @@ async fn ws(State(m): M, parts: Parts, upgrade: WebSocketUpgrade) -> Response {
     if !m.is_client_token_active(&token_id, now) {
         return unauthorized();
     }
+    m.shared.touch_activity();
     upgrade.on_upgrade(move |socket| session::run(m, socket, query, token_id, revoked))
 }
 
@@ -343,6 +344,7 @@ async fn shell_snapshot(State(m): M, Query(q): Query<HashMap<String, String>>, r
     if client(&m, &Call::of_request(&req)).is_none() {
         return unauthorized();
     }
+    m.shared.touch_activity();
     // Right after the app starts the power is not known yet: the capture would look stale, and
     // the machine be woken for what it holds.
     m.settled_power().await;
@@ -367,6 +369,7 @@ async fn thread_snapshot(
     if client(&m, &Call::of_request(&req)).is_none() {
         return unauthorized();
     }
+    m.shared.touch_activity();
     let flags = ThreadFlags::from_query(&q);
     m.cache.lock().unwrap().see_thread_encoding(flags);
     // As for the shell: the capture counts once the power is known.
@@ -489,8 +492,11 @@ async fn forward_authorized(m: Arc<MachineRuntime>, req: Request, authorized: bo
 
 async fn forward_parts(m: Arc<MachineRuntime>, parts: Parts, body: Body, authorized: bool) -> Response {
     let bearer = parts.headers.contains_key(header::AUTHORIZATION);
-    if authorized && parts.method == Method::POST {
-        m.user_action();
+    if authorized {
+        m.shared.touch_activity();
+        if parts.method == Method::POST {
+            m.user_action();
+        }
     }
     let asset = (parts.method == Method::GET && parts.uri.path().starts_with(assets::ROUTE))
         .then(|| assets::path(m.dir(), parts.uri.path()));

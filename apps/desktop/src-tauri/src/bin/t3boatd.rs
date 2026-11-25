@@ -2,16 +2,21 @@
 //! model, each machine's sleep-aware proxy and loops, and the MCP server, without the tray.
 //! Sign-in pages and notifications go to the log. Stops on SIGINT or SIGTERM.
 //!
+//! With `--auto-sleep` it stops the Boat sandbox it runs on once nothing works and no client used
+//! it for a while, and exits. Run it as a service that restarts it (systemd `Restart=always`), so
+//! it runs again whether Boat resumes the sandbox warm or boots it anew.
+//!
 //! Build: `cargo build --release --no-default-features --bin t3boatd`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use t3boat_lib::app::App;
-use t3boat_lib::boat::Boat;
+use t3boat_lib::boat::{Boat, Resume};
 use t3boat_lib::machine::Event;
 use t3boat_lib::mcp;
+use t3boat_lib::mothership::{should_sleep, DUE_GUARD_SECS};
 use t3boat_lib::store::{normalize_tailscale_host, Settings};
 use t3boat_lib::t3desktop::T3Desktop;
 use t3boat_lib::tailscale;
@@ -27,11 +32,23 @@ Options:
   --tailscale-host <host>  This computer's MagicDNS name, box.tailnet.ts.net: puts machines on
                            the tailnet [env: T3BOAT_TAILSCALE_HOST]
   --auto-tailscale         Detect the MagicDNS name at start when none is set
+  --auto-sleep             Stop this Boat sandbox and exit once no machine works, no scheduled
+                           work is near and no client used it for 300 s
+  --auto-sleep-secs <secs> The same after <secs> idle, at least 60 [env: T3BOAT_AUTO_SLEEP_SECS]
+  --wake [<sandbox-id>]    Wake that sandbox (a mothership running --auto-sleep) and exit
+                           [env: T3BOAT_MOTHERSHIP_ID]
   --github-login           Sign GitHub in via device code (prints URL + code) and exit
   -h, --help               Print this help";
 
 /// How often spend and Boat's daily starts are read, as the tray does.
 const COSTS_EVERY: Duration = Duration::from_secs(300);
+/// Idle time before `--auto-sleep` stops the sandbox, and the least it takes.
+const AUTO_SLEEP_SECS: u64 = 300;
+const MIN_AUTO_SLEEP_SECS: u64 = 60;
+/// How often `--auto-sleep` checks.
+const AUTO_SLEEP_POLL: Duration = Duration::from_secs(15);
+/// A check this late means Boat froze the sandbox and resumed it: someone woke it.
+const RESUMED_GAP: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default, PartialEq)]
 struct Config {
@@ -40,6 +57,10 @@ struct Config {
     /// Normalized.
     tailscale_host: Option<String>,
     auto_tailscale: bool,
+    /// Idle seconds before the sandbox stops itself; `None`: never.
+    auto_sleep: Option<u64>,
+    /// The sandbox to wake, then exit.
+    wake: Option<String>,
     github_login: bool,
     help: bool,
 }
@@ -54,7 +75,9 @@ impl Config {
             ..Config::default()
         };
         let mut host = env("T3BOAT_TAILSCALE_HOST");
-        let mut args = args.into_iter();
+        let mut auto_sleep_secs = env("T3BOAT_AUTO_SLEEP_SECS");
+        let mut auto_sleep = auto_sleep_secs.is_some();
+        let mut args = args.into_iter().peekable();
         while let Some(arg) = args.next() {
             let (flag, inline) = match arg.split_once('=') {
                 Some((flag, value)) if flag.starts_with("--") => (flag.to_owned(), Some(value.to_owned())),
@@ -72,10 +95,29 @@ impl Config {
                 "--t3-version" => config.t3_version = Some(value()?),
                 "--tailscale-host" => host = Some(value()?),
                 "--auto-tailscale" => config.auto_tailscale = true,
+                "--auto-sleep" => auto_sleep = true,
+                "--auto-sleep-secs" => {
+                    auto_sleep_secs = Some(value()?);
+                    auto_sleep = true;
+                }
+                // The id is optional: the next argument, unless it is another option.
+                "--wake" => {
+                    let id = inline.clone().or_else(|| args.next_if(|a| !a.starts_with('-')));
+                    let id = id.filter(|id| !id.trim().is_empty()).or_else(|| env("T3BOAT_MOTHERSHIP_ID"));
+                    config.wake = Some(id.context("--wake needs a sandbox id, or T3BOAT_MOTHERSHIP_ID")?.trim().to_owned());
+                }
                 "--github-login" => config.github_login = true,
                 "-h" | "--help" => config.help = true,
                 _ => bail!("unknown option {flag}\n\n{USAGE}"),
             }
+        }
+        if auto_sleep {
+            let secs = match auto_sleep_secs {
+                Some(secs) => secs.trim().parse().with_context(|| format!("auto-sleep seconds must be a number: {secs}"))?,
+                None => AUTO_SLEEP_SECS,
+            };
+            ensure!(secs >= MIN_AUTO_SLEEP_SECS, "auto-sleep needs at least {MIN_AUTO_SLEEP_SECS} s idle, not {secs}");
+            config.auto_sleep = Some(secs);
         }
         if let Some(host) = host {
             config.tailscale_host = Some(
@@ -121,6 +163,15 @@ async fn main() -> Result<()> {
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
         .init();
 
+    if let Some(id) = &config.wake {
+        let boat = Boat::locate().context("the Boat CLI is not installed: no boat in ~/.ascii/bin or on PATH")?;
+        if boat.wake(id).await? == Resume::DataExpired {
+            bail!("Boat deleted {id}'s disk after 14 days asleep");
+        }
+        println!("{id} is awake.");
+        return Ok(());
+    }
+
     let data_dir = config.data_dir()?;
 
     if config.github_login {
@@ -152,8 +203,8 @@ async fn main() -> Result<()> {
     let mcp_listener = mcp::bind().await?;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let app = App::new(boat, t3, data_dir, tx)?;
-    let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
-    let events_task = tokio::spawn(events(app.clone(), rx, flush_rx));
+    let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(events(app.clone(), rx, flush_rx));
 
     set_tailscale_host(&app, &config).await;
     tokio::spawn(costs(app.clone()));
@@ -165,19 +216,78 @@ async fn main() -> Result<()> {
     });
     tracing::info!("t3boatd running: {} machines, MCP at {}", app.machines().len(), mcp::url());
 
-    shutdown().await?;
-    tracing::info!("t3boatd stopping");
-    app.stop_forwards().await;
-    flush_and_wait(flush_tx, events_task).await;
+    let asleep = async {
+        match config.auto_sleep {
+            Some(secs) => auto_sleep(&app, secs, &flush_tx).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        stop = shutdown() => {
+            stop?;
+            tracing::info!("t3boatd stopping");
+            app.stop_forwards().await;
+            if let Err(e) = flush_and_wait(&flush_tx).await {
+                tracing::error!("saving state/caches on shutdown: {e:#}");
+            }
+        }
+        () = asleep => tracing::info!("t3boatd stopping: Boat is putting this sandbox to sleep"),
+    }
     Ok(())
 }
 
-async fn flush_and_wait(
-    flush_tx: tokio::sync::oneshot::Sender<()>,
-    events_task: tokio::task::JoinHandle<()>,
-) {
-    let _ = flush_tx.send(());
-    let _ = events_task.await;
+/// Requests to the event loop to save state and caches now; each is answered once written.
+type Flush = tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<Result<()>>>;
+
+/// Saves state and caches with every change sent before, and waits until written.
+async fn flush_and_wait(flush: &Flush) -> Result<()> {
+    let (done, written) = tokio::sync::oneshot::channel();
+    flush.send(done).map_err(|_| anyhow::anyhow!("event loop stopped"))?;
+    written.await.map_err(|_| anyhow::anyhow!("event loop dropped flush"))?
+}
+
+/// Returns once Boat is stopping the sandbox this runs on: no machine works, no scheduled work is
+/// near, and no client used this app for `idle_secs`. A failed stop is tried again on a later check.
+async fn auto_sleep(app: &App, idle_secs: u64, flush: &Flush) {
+    tracing::info!("auto-sleep: this sandbox stops after {idle_secs} s idle");
+    let mut checks = tokio::time::interval(AUTO_SLEEP_POLL);
+    checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last = SystemTime::now();
+    loop {
+        checks.tick().await;
+        let now = SystemTime::now();
+        if now.duration_since(last).unwrap_or_default() > RESUMED_GAP {
+            tracing::info!("auto-sleep: resumed, idle time counts anew");
+            app.shared.touch_activity();
+        }
+        last = now;
+        let activity = app.activity();
+        if !should_sleep(&activity, idle_secs, DUE_GUARD_SECS) {
+            continue;
+        }
+        tracing::info!("auto-sleep: idle for {} s with nothing working or due: stopping this sandbox", activity.idle_for_secs);
+        app.stop_forwards().await;
+        if let Err(e) = flush_and_wait(flush).await {
+            tracing::error!("auto-sleep: saving state/caches failed ({e:#}); skipping stop");
+            continue;
+        }
+        // Gate new wakes/MCP work before the final activity check so nothing can start a worker
+        // while `boat stop self` is running.
+        app.shared.set_stopping(true);
+        if !should_sleep(&app.activity(), idle_secs, DUE_GUARD_SECS) {
+            app.shared.set_stopping(false);
+            tracing::info!("auto-sleep: activity arrived during flush; staying awake");
+            continue;
+        }
+        match app.shared.boat.stop_self().await {
+            Ok(()) => return,
+            Err(e) => {
+                app.shared.set_stopping(false);
+                tracing::error!("auto-sleep: {e:#}; resetting idle window and trying again");
+                app.shared.touch_activity();
+            }
+        }
+    }
 }
 
 /// A host given on the command line replaces the saved one; `--auto-tailscale` fills one in only
@@ -202,7 +312,7 @@ async fn set_tailscale_host(app: &Arc<App>, config: &Config) {
 async fn events(
     app: Arc<App>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Event>,
-    mut flush: tokio::sync::oneshot::Receiver<()>,
+    mut flush: tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<Result<()>>>,
 ) {
     loop {
         tokio::select! {
@@ -212,14 +322,13 @@ async fn events(
                 Some(Event::Notify { title, body }) => tracing::info!("{title}: {body}"),
                 None => break,
             },
-            _ = &mut flush => {
+            Some(done) = flush.recv() => {
                 while let Ok(ev) = rx.try_recv() {
                     if let Event::Notify { title, body } = ev {
                         tracing::info!("{title}: {body}");
                     }
                 }
-                app.save();
-                break;
+                let _ = done.send(app.try_save());
             }
         }
     }
@@ -277,6 +386,8 @@ mod tests {
                 t3_version: Some("0.1.10".into()),
                 tailscale_host: Some("box.tail1.ts.net".into()),
                 auto_tailscale: true,
+                auto_sleep: None,
+                wake: None,
                 github_login: false,
                 help: false,
             }
@@ -312,6 +423,56 @@ mod tests {
         assert!(parse(&["--data-dir"], &[]).is_err());
         assert!(parse(&["--t3-version="], &[]).is_err());
         assert!(parse(&["--verbose"], &[]).is_err());
+    }
+
+    #[test]
+    fn auto_sleep_defaults_to_300_seconds() {
+        assert_eq!(parse(&["--auto-sleep"], &[]).unwrap().auto_sleep, Some(300));
+        assert_eq!(parse(&[], &[]).unwrap().auto_sleep, None);
+    }
+
+    #[test]
+    fn auto_sleep_secs_sets_and_turns_it_on() {
+        assert_eq!(parse(&["--auto-sleep-secs", "600"], &[]).unwrap().auto_sleep, Some(600));
+        assert_eq!(parse(&["--auto-sleep-secs=60"], &[]).unwrap().auto_sleep, Some(60));
+        assert_eq!(parse(&["--auto-sleep", "--auto-sleep-secs", "90"], &[]).unwrap().auto_sleep, Some(90));
+    }
+
+    #[test]
+    fn auto_sleep_reads_the_environment_and_the_flag_wins() {
+        let env = [("T3BOAT_AUTO_SLEEP_SECS", "120")];
+        assert_eq!(parse(&[], &env).unwrap().auto_sleep, Some(120));
+        assert_eq!(parse(&["--auto-sleep"], &env).unwrap().auto_sleep, Some(120));
+        assert_eq!(parse(&["--auto-sleep-secs", "900"], &env).unwrap().auto_sleep, Some(900));
+        assert_eq!(parse(&[], &[("T3BOAT_AUTO_SLEEP_SECS", " ")]).unwrap().auto_sleep, None);
+    }
+
+    #[test]
+    fn auto_sleep_refuses_less_than_a_minute_or_no_number() {
+        assert!(parse(&["--auto-sleep-secs", "59"], &[]).is_err());
+        assert!(parse(&["--auto-sleep-secs", "soon"], &[]).is_err());
+        assert!(parse(&["--auto-sleep-secs"], &[]).is_err());
+        assert!(parse(&[], &[("T3BOAT_AUTO_SLEEP_SECS", "30")]).is_err());
+    }
+
+    #[test]
+    fn wake_takes_an_id_or_the_mothership_variable() {
+        let env = [("T3BOAT_MOTHERSHIP_ID", "bx_env")];
+        assert_eq!(parse(&["--wake", "bx_flag"], &env).unwrap().wake.as_deref(), Some("bx_flag"));
+        assert_eq!(parse(&["--wake=bx_inline"], &[]).unwrap().wake.as_deref(), Some("bx_inline"));
+        assert_eq!(parse(&["--wake"], &env).unwrap().wake.as_deref(), Some("bx_env"));
+        // The next option is not the id.
+        let config = parse(&["--wake", "--data-dir", "/d"], &env).unwrap();
+        assert_eq!((config.wake.as_deref(), config.data_dir), (Some("bx_env"), Some("/d".into())));
+        // The variable alone wakes nothing: a running t3boatd may have it set.
+        assert_eq!(parse(&[], &env).unwrap().wake, None);
+    }
+
+    #[test]
+    fn wake_needs_an_id() {
+        assert!(parse(&["--wake"], &[]).is_err());
+        assert!(parse(&["--wake="], &[]).is_err());
+        assert!(parse(&["--wake"], &[("T3BOAT_MOTHERSHIP_ID", " ")]).is_err());
     }
 
     #[test]

@@ -450,6 +450,10 @@ impl Call {
 
 impl Tools for App {
     async fn call(self: Arc<Self>, call: Call) -> Result<String> {
+        if self.shared.is_stopping() {
+            bail!("t3boatd is going to sleep");
+        }
+        self.shared.touch_activity();
         let pending = call.pending();
         let (tx, rx) = tokio::sync::oneshot::channel();
         // Detached, so a client that gives up does not cancel the work halfway.
