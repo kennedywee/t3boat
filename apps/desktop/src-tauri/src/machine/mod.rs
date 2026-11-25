@@ -232,10 +232,25 @@ impl MachineRuntime {
         self.record.read().unwrap().clone()
     }
 
+    pub fn with_record<R>(&self, f: impl FnOnce(&Machine) -> R) -> R {
+        f(&self.record.read().unwrap())
+    }
+
     pub fn update_record(&self, f: impl FnOnce(&mut Machine)) {
         f(&mut self.record.write().unwrap());
         self.shared.persist();
         self.shared.changed();
+    }
+
+    /// Mutates the record under the write lock, persisting and notifying only when `f` reports
+    /// that the record actually changed.
+    pub fn mutate_record<R>(&self, f: impl FnOnce(&mut Machine) -> (bool, R)) -> R {
+        let (changed, out) = f(&mut self.record.write().unwrap());
+        if changed {
+            self.shared.persist();
+            self.shared.changed();
+        }
+        out
     }
 
     pub fn id(&self) -> String {

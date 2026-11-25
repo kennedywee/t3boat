@@ -4,13 +4,16 @@
 use super::classify::{Recording, is_connection_stream, recorded_stream};
 use super::threads::{STALE_AFTER, ThreadFlags};
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const MAX_STREAM_ITEMS: usize = 500;
 const MAX_UNARY: usize = 300;
+/// Encodings the thread store keeps every chat in: one per kind of client (the desktop app, a
+/// phone, ...). Each one costs a fetch per changed chat as the machine drains.
+pub const MAX_THREAD_ENCODINGS: usize = 4;
 
 /// The final orchestration state, captured while the watchdog drains the machine for sleep.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -81,8 +84,10 @@ pub struct Cache {
     pub streams: HashMap<String, Replay>,
     /// Unary success values by `request_key`.
     pub unary: HashMap<String, Answer>,
-    /// The thread snapshot encoding T3 Code last asked for: the one the capture stores chats in.
-    pub thread_encoding: Option<ThreadFlags>,
+    /// The thread snapshot encodings clients asked for, most recent first: the ones the capture
+    /// stores chats in. Read from the single one earlier versions kept as well.
+    #[serde(alias = "threadEncoding", deserialize_with = "thread_encodings")]
+    pub thread_encodings: Vec<ThreadFlags>,
     /// Deferred thread UI commands, sent on the next wake.
     pub deferred_commands: Vec<Value>,
     /// The last answer to `GET /api/voice/status`, which T3 Code reads on its own as it starts.
@@ -97,6 +102,19 @@ fn key_tag(key: &str) -> &str {
     key.split(' ').next().unwrap_or_default()
 }
 
+fn thread_encodings<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<ThreadFlags>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Many(Vec<ThreadFlags>),
+        One(Option<ThreadFlags>),
+    }
+    Ok(match Stored::deserialize(d)? {
+        Stored::Many(many) => many,
+        Stored::One(one) => one.into_iter().collect(),
+    })
+}
+
 impl Cache {
     pub fn load(path: &Path) -> Self {
         std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
@@ -108,6 +126,14 @@ impl Cache {
 
     pub fn bump_epoch(&mut self) {
         self.epoch += 1;
+    }
+
+    /// A client asked for a chat in `flags`: the store keeps chats in it from the next sleep on.
+    /// The least recently asked one goes past `MAX_THREAD_ENCODINGS`.
+    pub fn see_thread_encoding(&mut self, flags: ThreadFlags) {
+        self.thread_encodings.retain(|f| *f != flags);
+        self.thread_encodings.insert(0, flags);
+        self.thread_encodings.truncate(MAX_THREAD_ENCODINGS);
     }
 
     /// `first`: the stream's first chunk, which starts a new recording.
@@ -460,6 +486,38 @@ mod tests {
         assert_eq!(c.signed_out_providers(), vec!["a".to_owned()]);
         c.fold_providers(&json!([provider("a", "authenticated", json!([]))]));
         assert!(c.signed_out_providers().is_empty());
+    }
+
+    #[test]
+    fn every_kind_of_client_has_its_encoding_kept() {
+        let mut c = Cache::default();
+        let desktop = ThreadFlags { defer_work: true, compact_ids: true, ..Default::default() };
+        let phone = ThreadFlags::default();
+        c.see_thread_encoding(desktop);
+        c.see_thread_encoding(phone);
+        c.see_thread_encoding(desktop);
+        assert_eq!(c.thread_encodings, vec![desktop, phone]);
+        let others = [1, 2, 4, 8].map(|bits: u8| ThreadFlags {
+            defer_work: bits & 1 != 0,
+            compact_turn_items: bits & 2 != 0,
+            dedupe_bodies: bits & 4 != 0,
+            compact_ids: bits & 8 != 0,
+        });
+        others.iter().for_each(|f| c.see_thread_encoding(*f));
+        assert_eq!(c.thread_encodings.len(), MAX_THREAD_ENCODINGS);
+        assert_eq!(c.thread_encodings[0], others[3]);
+        assert!(!c.thread_encodings.contains(&phone), "the least recently asked goes first");
+    }
+
+    #[test]
+    fn the_encoding_of_earlier_versions_is_read() {
+        let one: Cache = serde_json::from_str(r#"{"threadEncoding": {"compactIds": true}}"#).unwrap();
+        assert_eq!(one.thread_encodings, vec![ThreadFlags { compact_ids: true, ..Default::default() }]);
+        let none: Cache = serde_json::from_str(r#"{"threadEncoding": null}"#).unwrap();
+        assert!(none.thread_encodings.is_empty());
+        let saved = serde_json::to_vec(&one).unwrap();
+        let again: Cache = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(again.thread_encodings, one.thread_encodings);
     }
 
     #[test]

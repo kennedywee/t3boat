@@ -66,21 +66,22 @@ pub fn path(machine_dir: &Path, thread: &str, sequence: u64, flags: ThreadFlags)
     dir(machine_dir).join(format!("{id}.{sequence}.{}.json", flags.key()))
 }
 
-/// A chat the store should hold, and the file that holds it.
+/// A chat the store should hold, in one encoding, and the file that holds it.
 pub struct Wanted<'a> {
     pub thread: &'a str,
     pub sequence: u64,
+    pub flags: ThreadFlags,
     pub path: PathBuf,
 }
 
 /// What the store should hold for the state the machine sleeps with, most recently used first:
 /// every chat of `shell` that is not expired, as of its thread sequence in `sequences` (the
-/// manifest's), in the encoding `flags`.
+/// manifest's), in each of the encodings `encodings`, most recently asked first.
 pub fn plan<'a>(
     machine_dir: &Path,
     shell: &'a Value,
     sequences: &HashMap<String, u64>,
-    flags: ThreadFlags,
+    encodings: &[ThreadFlags],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<Wanted<'a>> {
     let mut rows: Vec<&Value> =
@@ -88,9 +89,14 @@ pub fn plan<'a>(
     rows.sort_by(|a, b| b["updatedAt"].as_str().cmp(&a["updatedAt"].as_str()));
     rows.into_iter()
         .filter_map(|row| row["id"].as_str())
-        .filter_map(|thread| {
-            let sequence = *sequences.get(thread)?;
-            Some(Wanted { thread, sequence, path: path(machine_dir, thread, sequence, flags) })
+        .filter_map(|thread| Some((thread, *sequences.get(thread)?)))
+        .flat_map(|(thread, sequence)| {
+            encodings.iter().map(move |&flags| Wanted {
+                thread,
+                sequence,
+                flags,
+                path: path(machine_dir, thread, sequence, flags),
+            })
         })
         .collect()
 }
@@ -159,10 +165,28 @@ mod tests {
         ]});
         let sequences = [("old", 3), ("new", 9), ("expired", 4), ("settled", 5)];
         let sequences = sequences.into_iter().map(|(id, sequence)| (id.to_owned(), sequence)).collect();
-        let plan = plan(Path::new("/m"), &shell, &sequences, ThreadFlags::default(), now);
+        let plan = plan(Path::new("/m"), &shell, &sequences, &[ThreadFlags::default()], now);
         let chats: Vec<(&str, u64)> = plan.iter().map(|w| (w.thread, w.sequence)).collect();
         assert_eq!(chats, vec![("new", 9), ("settled", 5), ("old", 3)]);
         assert_eq!(plan[0].path, Path::new("/m/threads/6e6577.9.0000.json"));
+    }
+
+    #[test]
+    fn plan_holds_each_chat_in_every_encoding_asked_for() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-16T12:00:00Z").unwrap().to_utc();
+        let shell = json!({"threads": [
+            {"id": "a", "updatedAt": "2026-11-15T00:00:00.000Z"},
+            {"id": "b", "updatedAt": "2026-11-16T00:00:00.000Z"},
+        ]});
+        let sequences = [("a".to_owned(), 1), ("b".to_owned(), 2)].into_iter().collect();
+        let desktop = ThreadFlags { defer_work: true, compact_ids: true, ..Default::default() };
+        let phone = ThreadFlags::default();
+        let plan = plan(Path::new("/m"), &shell, &sequences, &[desktop, phone], now);
+        let files: Vec<(&str, String)> = plan.iter().map(|w| (w.thread, w.flags.key())).collect();
+        let want = [("b", "1001"), ("b", "0000"), ("a", "1001"), ("a", "0000")];
+        assert_eq!(files, want.map(|(t, k)| (t, k.to_owned())));
+        assert!(plan.iter().all(|w| w.path == path(Path::new("/m"), w.thread, w.sequence, w.flags)));
+        assert!(super::plan(Path::new("/m"), &shell, &sequences, &[], now).is_empty());
     }
 
     #[test]

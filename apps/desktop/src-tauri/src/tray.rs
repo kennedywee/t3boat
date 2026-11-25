@@ -566,6 +566,36 @@ async fn resize_machine(ui: State<'_, Ui>, id: String, size: String) -> Res {
     ui.app()?.machine(&id).map_err(err)?.resize(&size).await.map_err(err)
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientTokenView {
+    id: String,
+    label: Option<String>,
+    tailnet: bool,
+    created_at: i64,
+    expires_at: Option<i64>,
+}
+
+#[tauri::command]
+fn list_client_tokens(ui: State<'_, Ui>, id: String) -> Res<Vec<ClientTokenView>> {
+    let tokens = ui.app()?.machine(&id).map_err(err)?.client_tokens();
+    Ok(tokens
+        .into_iter()
+        .map(|t| ClientTokenView {
+            id: t.id,
+            label: t.label,
+            tailnet: t.jkt.is_some(),
+            created_at: t.created_at,
+            expires_at: t.expires_at,
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn revoke_client_token(ui: State<'_, Ui>, id: String, token_id: String) -> Res<bool> {
+    Ok(ui.app()?.machine(&id).map_err(err)?.revoke_client_token(&token_id))
+}
+
 #[tauri::command]
 async fn delete_machine(ui: State<'_, Ui>, id: String, discard: Option<bool>) -> Res {
     let app = ui.app()?;
@@ -583,6 +613,14 @@ async fn update_settings(handle: AppHandle, ui: State<'_, Ui>, mut settings: Set
             return Err(format!("Fleet repo must be a GitHub owner/name, like kennedywee/fleet: {repo}"));
         }
     }
+    // Empty means loopback only; anything else must be this computer's MagicDNS name.
+    settings.tailscale_host = match settings.tailscale_host.map(|h| h.trim().to_owned()).filter(|h| !h.is_empty()) {
+        Some(host) => Some(
+            crate::store::normalize_tailscale_host(&host)
+                .ok_or_else(|| format!("Tailscale name must look like mybox.tailnet.ts.net: {host}"))?,
+        ),
+        None => None,
+    };
     if app.settings().start_at_login != settings.start_at_login {
         apply_autostart(&handle, settings.start_at_login).map_err(|e| format!("Couldn't change start at login: {e}"))?;
     }
@@ -717,6 +755,8 @@ pub fn run() {
             sleep_machine,
             open_machine,
             pair_machine,
+            list_client_tokens,
+            revoke_client_token,
             delete_machine,
             resize_machine,
             keep_awake,

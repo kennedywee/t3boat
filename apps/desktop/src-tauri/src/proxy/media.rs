@@ -6,8 +6,8 @@
 //! the machine: a sleeping one answers 503. Any other socket (dictation, and whatever T3 adds) is
 //! opened by a person and wakes it.
 
-use super::auth::TicketUse;
-use super::{client_authorized, query_param, query_without, relay, unauthorized, upstream, upstream_bearer, wake, Relay, M};
+use super::auth::{Call, TicketUse};
+use super::{client, now_secs, query_param, query_without, relay, unauthorized, upstream, upstream_bearer, wake, Relay, M};
 use crate::machine::{MachineRuntime, Power};
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame as DownClose, Message as DownMsg, WebSocket, WebSocketUpgrade};
@@ -35,7 +35,7 @@ pub async fn stream(
     if let Ok(upgrade) = upgrade {
         return socket(m, upgrade, &parts, false).await;
     }
-    let Some(target) = authorized_target(&m, &parts) else {
+    let Some((target, _)) = authorized_target(&m, &parts) else {
         return unauthorized();
     };
     // Anything but a read is someone working the device or the browser.
@@ -49,16 +49,30 @@ pub async fn stream(
 /// Relays a WebSocket to the same path on the machine. `wakes`: a sleeping machine is woken for
 /// it; otherwise it answers 503.
 pub(super) async fn socket(m: Arc<MachineRuntime>, upgrade: WebSocketUpgrade, parts: &Parts, wakes: bool) -> Response {
-    let Some(target) = authorized_target(&m, parts) else {
+    // Subscribe before checking active state and before awaiting upstream connect so a revocation
+    // landing in that window is never missed.
+    let revoked = m.auth.subscribe_revoked();
+    let Some((target, token_id)) = authorized_target(&m, parts) else {
         return unauthorized();
     };
+    if !m.is_client_token_active(&token_id, now_secs()) {
+        return unauthorized();
+    }
     if m.power() != Power::Running
         && let Err(res) = wake(&m, wakes).await
     {
         return res;
     }
+    if !m.is_client_token_active(&token_id, now_secs()) {
+        return unauthorized();
+    }
     match upstream::connect(&m.upstream_url(), &m.upstream_token(), &target).await {
-        Ok(up) => upgrade.on_upgrade(move |down| pump(m, down, up)),
+        Ok(up) => {
+            if !m.is_client_token_active(&token_id, now_secs()) {
+                return unauthorized();
+            }
+            upgrade.on_upgrade(move |down| pump(m, down, up, token_id, revoked))
+        }
         // The machine's own refusal (no device hub, say) reaches T3 Code as it was.
         Err(e) => match e.downcast_ref() {
             Some(UpError::Http(res)) => res.status().into_response(),
@@ -67,18 +81,26 @@ pub(super) async fn socket(m: Arc<MachineRuntime>, upgrade: WebSocketUpgrade, pa
     }
 }
 
-/// Path and query on the machine, minus the proxy's ticket; `None` if the caller holds neither a
-/// media ticket nor a token of this proxy.
-fn authorized_target(m: &MachineRuntime, parts: &Parts) -> Option<String> {
+/// Path and query on the machine, minus the proxy's ticket, plus the owning device's token id;
+/// `None` if the caller holds neither a media ticket nor a token of this proxy.
+fn authorized_target(m: &MachineRuntime, parts: &Parts) -> Option<(String, String)> {
+    let call = Call::of(parts);
     let query = parts.uri.query().unwrap_or_default();
-    let ticketed = query_param(query, "wsTicket").is_some_and(|t| m.auth.check_ticket(&t, TicketUse::Media));
-    (ticketed || client_authorized(m, &parts.headers))
-        .then(|| format!("{}?{}", parts.uri.path(), query_without(query, &["wsTicket"])))
+    let token_id = query_param(query, "wsTicket")
+        .and_then(|t| m.auth.check_ticket(&t, TicketUse::Media, &call, now_secs()))
+        .or_else(|| client(m, &call).map(|t| t.id))?;
+    Some((format!("{}?{}", parts.uri.path(), query_without(query, &["wsTicket"])), token_id))
 }
 
 /// Passes frames both ways until either side ends, close code and reason included: T3 Code
 /// reads them to tell a closed tab from a stream to reopen.
-async fn pump(m: Arc<MachineRuntime>, down: WebSocket, up: upstream::Upstream) {
+async fn pump(
+    m: Arc<MachineRuntime>,
+    down: WebSocket,
+    up: upstream::Upstream,
+    token_id: String,
+    mut revoked: tokio::sync::broadcast::Receiver<String>,
+) {
     let (mut to_client, mut from_client) = down.split();
     let (mut to_machine, mut from_machine) = up.split();
     let upward = async {
@@ -113,9 +135,24 @@ async fn pump(m: Arc<MachineRuntime>, down: WebSocket, up: upstream::Upstream) {
             }
         }
     };
+    let on_revoke = async {
+        loop {
+            match revoked.recv().await {
+                Ok(id) if id == token_id => break,
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    if !m.is_client_token_active(&token_id, now_secs()) {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
     tokio::select! {
         _ = upward => {}
         _ = downward => {}
+        _ = on_revoke => {}
     }
 }
 

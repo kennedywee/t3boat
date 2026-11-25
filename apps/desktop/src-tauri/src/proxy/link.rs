@@ -20,6 +20,12 @@ use std::sync::Arc;
 /// Linking exchanges a few small JSON and form bodies.
 const MAX_STEP_BODY: usize = 64 * 1024;
 
+/// Whether `path` is one of linking's routes. Its tokens are bearer tokens for a T3 server on
+/// this computer, so these answer loopback only, never through the tailnet.
+pub fn route(path: &str) -> bool {
+    path == "/mcp" || path.starts_with("/oauth/mcp/")
+}
+
 /// A step of linking. Anyone can call these, so they never wake the machine; whoever links got
 /// a pairing code from it moments ago.
 fn step(parts: &Parts) -> Relay {
@@ -155,6 +161,16 @@ fn handshake(m: &Arc<MachineRuntime>, body: &[u8]) -> Option<Response> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn linking_routes_are_known() {
+        for path in ["/mcp", "/oauth/mcp/register", "/oauth/mcp/decision", "/oauth/mcp/token"] {
+            assert!(super::route(path), "{path}");
+        }
+        for path in ["/mcpx", "/oauth/token", "/api/mcp", "/ws"] {
+            assert!(!super::route(path), "{path}");
+        }
+    }
+
     use super::*;
 
     const MACHINE: &str = "https://box.example/mcp";
