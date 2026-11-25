@@ -420,6 +420,8 @@ function TailnetDevices({
   onError: (text: string) => void;
 }) {
   const [devices, setDevices] = useState<ClientToken[]>([]);
+  const devicesRef = useRef(devices);
+  devicesRef.current = devices;
   const [pairing, setPairing] = useState<(TailnetPairing & { before: string[] }) | null>(null);
   const [starting, setStarting] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -444,7 +446,7 @@ function TailnetDevices({
   const pair = () => {
     setStarting(true);
     call("pair_machine_tailnet", { id: m.id })
-      .then((p) => setPairing({ ...p, before: devices.map((t) => t.id) }), fail)
+      .then((p) => setPairing({ ...p, before: devicesRef.current.map((t) => t.id) }), fail)
       .finally(() => setStarting(false));
   };
   const copy = () =>

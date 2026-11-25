@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { call, errorText } from "../api";
 import type { McpClient, Settings, UiState } from "../types";
 import { AgentName, AgentNames } from "./AgentLogos";
@@ -58,12 +58,16 @@ const TAILSCALE_RE = new RegExp(`^${TAILSCALE_LABEL}\\.${TAILSCALE_LABEL}\\.ts\\
 function TailscaleHost({ value, onSave }: { value: string; onSave: (host: string) => void }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
+  const valueRef = useRef(value);
+  valueRef.current = value;
   const [detecting, setDetecting] = useState(false);
   const [detectError, setDetectError] = useState<string | null>(null);
   const host = draft.trim();
   const valid = host === "" || TAILSCALE_RE.test(host);
   const commit = (next = host) => {
-    if ((next === "" || TAILSCALE_RE.test(next)) && next !== value) onSave(next);
+    if ((next === "" || TAILSCALE_RE.test(next)) && next !== valueRef.current) onSaveRef.current(next);
   };
   const detect = () => {
     setDetecting(true);
