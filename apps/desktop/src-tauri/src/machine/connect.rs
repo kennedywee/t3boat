@@ -80,7 +80,7 @@ impl MachineRuntime {
                 .await?;
             let (exit, log) = out.stdout.split_once("---").unwrap_or_default();
             if !opened && let Some(url) = log.split_whitespace().find(|w| w.starts_with("https://")) {
-                crate::app::open_url(url)?;
+                crate::app::open_sign_in(&format!("T3 Connect for {}", self.id()), url)?;
                 opened = true;
             }
             match exit.trim() {

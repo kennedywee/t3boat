@@ -585,6 +585,7 @@ impl App {
             }
         });
         // The machine exists either way; its row still offers "Add to T3 Code".
+        #[cfg(feature = "desktop")]
         if let Err(e) = self.pair(&machine) {
             self.shared.notify(format!("Couldn't open T3 Code for {name}"), format!("{e:#}; use Add to T3 Code"));
         }
@@ -688,6 +689,7 @@ impl App {
         if !machine.record().client_tokens.is_empty() {
             return Ok(machine);
         }
+        #[cfg(feature = "desktop")]
         if let Err(e) = self.pair(&machine) {
             self.shared.notify(format!("Couldn't open T3 Code for {name}"), format!("{e:#}; use Add to T3 Code"));
         }
@@ -737,9 +739,17 @@ impl App {
 
     /// Opens T3 Code's own "add backend" confirmation for this machine.
     pub fn pair(&self, machine: &MachineRuntime) -> Result<()> {
-        let code = machine.auth.new_pairing_code();
-        let pairing_url = format!("http://localhost:{}/pair#token={code}", machine.record().local_port);
-        open_url(&format!("t3code://pair?pairingUrl={}", urlencoding::encode(&pairing_url)))
+        #[cfg(not(feature = "desktop"))]
+        {
+            let _ = machine;
+            bail!("desktop T3 Code pairing is unavailable in headless mode; use pair_phone instead");
+        }
+        #[cfg(feature = "desktop")]
+        {
+            let code = machine.auth.new_pairing_code();
+            let pairing_url = format!("http://localhost:{}/pair#token={code}", machine.record().local_port);
+            open_url(&format!("t3code://pair?pairingUrl={}", urlencoding::encode(&pairing_url)))
+        }
     }
 
     /// A one-time pairing URL for a phone or another device on the tailnet: puts the machine on
@@ -1093,16 +1103,31 @@ fn human_secs(s: u64) -> String {
     }
 }
 
+/// Opens a sign-in page in the desktop browser, or logs one labeled line in headless mode so the
+/// user can open it on another device.
+pub fn open_sign_in(what: &str, url: &str) -> Result<()> {
+    #[cfg(feature = "desktop")]
+    {
+        let _ = what;
+        open_url(url)
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        tracing::info!("{what}: sign in at {url}");
+        Ok(())
+    }
+}
+
 /// On Linux through GLib, as `gio open` does: `xdg-open` outside GNOME and KDE takes a scheme
 /// with a digit in it, like `t3code:`, for a file name.
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "desktop", target_os = "linux"))]
 pub fn open_url(url: &str) -> Result<()> {
     use gtk::gio;
     gio::AppInfo::launch_default_for_uri(url, None::<&gio::AppLaunchContext>)
         .map_err(|e| anyhow::anyhow!("could not open {url}: {e}"))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(feature = "desktop", not(target_os = "linux")))]
 pub fn open_url(url: &str) -> Result<()> {
     let status = if cfg!(target_os = "macos") {
         std::process::Command::new("open").arg(url).status()
@@ -1113,6 +1138,13 @@ pub fn open_url(url: &str) -> Result<()> {
     if !status.success() {
         bail!("could not open {url}");
     }
+    Ok(())
+}
+
+/// Headless: there is no browser here, so the URL goes to the log.
+#[cfg(not(feature = "desktop"))]
+pub fn open_url(url: &str) -> Result<()> {
+    tracing::info!("open URL in browser: {url}");
     Ok(())
 }
 

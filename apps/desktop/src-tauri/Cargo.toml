@@ -10,14 +10,34 @@ default-run = "t3boat"
 name = "t3boat_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# The tray app. `t3boatd` builds without it: `cargo build --no-default-features --bin t3boatd`.
+[[bin]]
+name = "t3boat"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+# Tauri, the tray and the GTK/WebKit stack under them.
+desktop = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-autostart",
+    "dep:tauri-plugin-single-instance",
+    "dep:tauri-plugin-notification",
+    "dep:gdkx11",
+    "dep:gtk",
+    "dep:ksni",
+]
+
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
-tauri-plugin-autostart = "2"
-tauri-plugin-single-instance = "2"
-tauri-plugin-notification = "2"
+tauri = { version = "2", features = ["tray-icon", "image-png"], optional = true }
+tauri-plugin-autostart = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
+tauri-plugin-notification = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -43,9 +63,9 @@ ring = "0.17"
 qrcode ={ version = "0.14", default-features = false, features = ["svg"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gdkx11 = "0.18"
-gtk = "0.18"
-ksni = { version = "0.3.7", default-features = false, features = ["tokio"] }
+gdkx11 = { version = "0.18", optional = true }
+gtk = { version = "0.18", optional = true }
+ksni = { version = "0.3.7", default-features = false, features = ["tokio"], optional = true }
 libc = "0.2"
 
 [profile.release]

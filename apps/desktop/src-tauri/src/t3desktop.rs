@@ -35,7 +35,10 @@ const LOCAL_SCOPES: &[&str] = &["orchestration:read", "filesystem:read"];
 #[derive(Clone, Debug)]
 pub struct T3Desktop {
     /// The `t3` launcher the desktop app writes into `~/.t3/bin`; it runs the app's bundled CLI.
-    cli: PathBuf,
+    /// `None` on a headless computer without T3 Code: see `pinned`.
+    cli: Option<PathBuf>,
+    /// The T3 version machines get, when set instead of asking `t3 --version`.
+    pinned: Option<String>,
     /// Where t3boat keeps its session on the desktop app's server (T3 Code lists it under
     /// Settings → Connections as "t3boat"). Set by the app before any API call.
     token_file: Option<PathBuf>,
@@ -44,15 +47,33 @@ pub struct T3Desktop {
 }
 
 impl T3Desktop {
+    /// The `t3` CLI: the desktop app's launcher in `~/.t3/bin`, else a standalone install in
+    /// `~/.local/bin` (as on a headless Linux computer), else `t3` on PATH.
     pub fn locate() -> Option<Self> {
         let home = dirs::home_dir()?;
-        let bin = home.join(".t3").join("bin");
-        let candidates: &[&str] = if cfg!(windows) { &["t3.cmd", "t3.exe"] } else { &["t3"] };
-        candidates
+        let names: &[&str] = if cfg!(windows) { &["t3.cmd", "t3.exe"] } else { &["t3"] };
+        [home.join(".t3").join("bin"), home.join(".local").join("bin")]
             .iter()
-            .map(|name| bin.join(name))
+            .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
             .find(|p| p.is_file())
-            .map(|cli| Self { cli, token_file: None, token: Arc::default() })
+            .or_else(|| which::which("t3").ok())
+            .map(|cli| Self { cli: Some(cli), pinned: None, token_file: None, token: Arc::default() })
+    }
+
+    /// No T3 Code on this computer: machines get T3 `version`. There are no desktop projects or
+    /// links, and opening T3 Code fails with a clear error.
+    pub fn pinned(version: String) -> Self {
+        Self { cli: None, pinned: Some(version), token_file: None, token: Arc::default() }
+    }
+
+    /// Machines get T3 `version` instead of the installed CLI's.
+    pub fn with_version(mut self, version: String) -> Self {
+        self.pinned = Some(version);
+        self
+    }
+
+    fn cli(&self) -> Result<&PathBuf> {
+        self.cli.as_ref().ok_or_else(|| anyhow!("T3 Code is not installed on this computer"))
     }
 
     pub fn with_token_file(mut self, path: PathBuf) -> Self {
@@ -63,7 +84,10 @@ impl T3Desktop {
 
     /// e.g. `0.1.10-nightly.20261114.4669`.
     pub async fn version(&self) -> Result<String> {
-        let out = command(&self.cli)
+        if let Some(version) = &self.pinned {
+            return Ok(version.clone());
+        }
+        let out = command(self.cli()?)
             .arg("--version")
             .output()
             .await
@@ -81,7 +105,7 @@ impl T3Desktop {
     /// Runs the CLI's `environment` command: links live in the desktop app's database, which the
     /// CLI opens itself, so this works whether or not the app runs.
     async fn environment(&self, args: &[&str]) -> Result<Vec<u8>> {
-        let out = command(&self.cli)
+        let out = command(self.cli()?)
             .arg("environment")
             .args(args)
             .output()
@@ -104,6 +128,9 @@ impl T3Desktop {
     }
 
     pub async fn links(&self) -> Result<Vec<Link>> {
+        if self.cli.is_none() {
+            return Ok(Vec::new());
+        }
         Ok(serde_json::from_slice(&self.environment(&["list", "--json"]).await?)?)
     }
 
@@ -115,6 +142,9 @@ impl T3Desktop {
     }
 
     pub async fn unlink(&self, environment_id: &str) -> Result<()> {
+        if self.cli.is_none() {
+            return Ok(());
+        }
         self.environment(&["unlink", environment_id]).await?;
         Ok(())
     }
@@ -123,6 +153,7 @@ impl T3Desktop {
     /// `t3code://`, reaches its running app as a second launch, which shows its window; macOS
     /// delivers links to the running app without that, so there it opens by bundle id.
     pub fn activate(&self) -> Result<()> {
+        self.cli()?;
         if cfg!(target_os = "macos") {
             let status = std::process::Command::new("open").args(["-b", BUNDLE_ID]).status()?;
             if !status.success() {
@@ -138,6 +169,9 @@ impl T3Desktop {
     /// pinned first, then most recently used. Asks for the trimmed snapshot T3's own client
     /// loads: every project, without the thousands of old threads (MBs, seconds) this ignores.
     pub async fn projects(&self) -> Result<Vec<Project>> {
+        if self.cli.is_none() {
+            return Ok(Vec::new());
+        }
         let shell = self
             .authorized(|origin, token| async move {
                 let res = reqwest::Client::new()
@@ -209,7 +243,7 @@ impl T3Desktop {
         if let Some(token) = saved.as_deref().filter(|t| Some(*t) != rejected) {
             return Ok(token.to_owned());
         }
-        let mut cmd = command(&self.cli);
+        let mut cmd = command(self.cli()?);
         cmd.args(["auth", "session", "issue", "--token-only", "--ttl", "3650d", "--label", "t3boat"]);
         for scope in LOCAL_SCOPES {
             cmd.args(["--scope", scope]);
@@ -228,6 +262,7 @@ impl T3Desktop {
 
     /// Opens one of an environment's threads in the desktop app.
     pub fn open_thread(&self, environment_id: &str, thread_id: &str) -> Result<()> {
+        self.cli()?;
         crate::app::open_url(&format!("t3code://threads/{environment_id}/{thread_id}"))
     }
 }
@@ -254,6 +289,25 @@ fn local_origin() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pinned_works_without_t3_code() {
+        let t3 = T3Desktop::pinned("0.1.10".into());
+        assert_eq!(t3.version().await.unwrap(), "0.1.10");
+        assert!(t3.projects().await.unwrap().is_empty());
+        assert!(t3.links().await.unwrap().is_empty());
+        t3.unlink("env").await.unwrap();
+        let link = t3.link("http://localhost:1", "code", "full-access").await.unwrap_err();
+        assert_eq!(link.to_string(), "T3 Code is not installed on this computer");
+        assert!(t3.activate().is_err());
+        assert!(t3.open_thread("env", "thread").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_pinned_version_wins_over_the_cli() {
+        let t3 = T3Desktop { cli: Some("/nonexistent/t3".into()), pinned: None, token_file: None, token: Arc::default() };
+        assert_eq!(t3.with_version("0.2.0".into()).version().await.unwrap(), "0.2.0");
+    }
 
     /// Against the running desktop app, with t3boat's own session file:
     /// `cargo test reads_the_desktop_projects -- --ignored --nocapture`.
