@@ -85,45 +85,61 @@ pub async fn run(
     };
     s.settle();
 
+    let m_rev = s.m.clone();
     let mut power = s.m.subscribe_power();
-    let close = loop {
-        let step = tokio::select! {
-            ev = revoked.recv() => match ev {
-                Ok(id) if id == token_id => break Some((CLOSE_REVOKED, "revoked".to_owned())),
-                Ok(_) => Ok(None),
+    let on_revoke = async {
+        loop {
+            match revoked.recv().await {
+                Ok(id) if id == token_id => break,
+                Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    if !s.m.is_client_token_active(&token_id, chrono::Utc::now().timestamp()) {
-                        break Some((CLOSE_REVOKED, "revoked".to_owned()));
+                    if !m_rev.is_client_token_active(&token_id, chrono::Utc::now().timestamp()) {
+                        break;
                     }
-                    Ok(None)
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => Ok(None),
-            },
-            Ok(()) = power.changed() => {
-                let now = *power.borrow_and_update();
-                s.on_power(now)
-            }
-            msg = down_rx.next() => match msg {
-                Some(Ok(DownMsg::Text(text))) => s.on_down(text.as_str()).await,
-                Some(Ok(DownMsg::Close(_))) | None | Some(Err(_)) => break None,
-                Some(Ok(_)) => Ok(None),
-            },
-            Some(ev) = rx.recv() => s.on_internal(ev).await,
-        };
-        match step {
-            Ok(None) => {}
-            Ok(Some(reason)) => break Some((CLOSE_RECONNECT, reason)),
-            Err(e) => {
-                tracing::warn!("session error: {e:#}");
-                break Some((CLOSE_RECONNECT, "proxy error".to_owned()));
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
             }
         }
     };
+    let close = tokio::select! {
+        biased;
+        () = on_revoke => Some((CLOSE_REVOKED, "revoked".to_owned())),
+        close = async {
+            loop {
+                let step = tokio::select! {
+                    Ok(()) = power.changed() => {
+                        let now = *power.borrow_and_update();
+                        s.on_power(now)
+                    }
+                    msg = down_rx.next() => match msg {
+                        Some(Ok(DownMsg::Text(text))) => s.on_down(text.as_str()).await,
+                        Some(Ok(DownMsg::Close(_))) | None | Some(Err(_)) => break None,
+                        Some(Ok(_)) => Ok(None),
+                    },
+                    Some(ev) = rx.recv() => s.on_internal(ev).await,
+                };
+                match step {
+                    Ok(None) => {}
+                    Ok(Some(reason)) => break Some((CLOSE_RECONNECT, reason)),
+                    Err(e) => {
+                        tracing::warn!("session error: {e:#}");
+                        break Some((CLOSE_RECONNECT, "proxy error".to_owned()));
+                    }
+                }
+            }
+        } => close,
+    };
+    // Stop the upstream task before awaiting the downstream close frame so a stalled client
+    // cannot keep upstream work or frames flowing after revocation or error.
+    s.drop_upstream();
     tracing::info!("T3 Code socket closing ({close:?})");
     if let Some((code, reason)) = close {
-        let _ = s.down.send(DownMsg::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            s.down.send(DownMsg::Close(Some(CloseFrame { code, reason: reason.into() }))),
+        )
+        .await;
     }
-    s.drop_upstream();
 }
 
 struct Session {
