@@ -117,6 +117,24 @@ export interface PortView {
   link: string | null;
 }
 
+/** A device paired with a machine's proxy. Revoking it unpairs that device only. */
+export interface ClientToken {
+  id: string;
+  /** what the device called itself when it paired */
+  label: string | null;
+  /** paired over the tailnet (DPoP-bound), not T3 Code on this computer */
+  tailnet: boolean;
+  createdAt: number; // unix secs; 0 when unknown
+  expiresAt: number | null; // unix secs
+}
+
+/** A one-time URL that pairs a device on the tailnet, and its QR code. */
+export interface TailnetPairing {
+  url: string;
+  /** `url` as a QR code: an `<svg>` element, dark on white */
+  svg: string;
+}
+
 export type SetupAction = "installBoat" | "signInBoat" | "installT3" | "recheck";
 
 /** A sandbox on the Boat account that t3boat did not create, as `boat list` describes it. */
@@ -157,6 +175,10 @@ export interface Commands {
   sleep_machine: [{ id: string }, void];
   open_machine: [{ id: string; thread?: string }, void];
   pair_machine: [{ id: string }, void];
+  pair_machine_tailnet: [{ id: string }, TailnetPairing]; // puts it on the tailnet first
+  detect_tailscale_host: [undefined, string | null]; // null: Tailscale missing or stopped
+  list_client_tokens: [{ id: string }, ClientToken[]];
+  revoke_client_token: [{ id: string; tokenId: string }, boolean]; // false: no such token
   delete_machine: [{ id: string; discard?: boolean }, void];
   resize_machine: [{ id: string; size: string }, void];
   keep_awake: [{ id: string; minutes: number | null }, void]; // null: until stopped; 0: stop

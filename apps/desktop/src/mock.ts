@@ -3,10 +3,11 @@
 // ?machines=0|many|<count>  ?busy=1  ?mcp=mixed (Claude Code added, Codex and Antigravity not installed)
 // ?uploads=1 (GitHub login connected), with &everything=1 (used for all of gh and git)
 // ?projects=0|error (T3 Code has no projects with a remote / listing them fails)
+// ?tailscale=1 (this computer's Tailscale name is set: "Pair phone" shows, sb_7f2a has a paired phone)
 // ?ready=1 (a new machine comes up in T3 Code with its agents signed in and acme on it, as the website shows it)
 import type { Backend } from "./api";
 import { timeLapse } from "./pixel/clock";
-import type { BoatSandbox, CommandArgs, CommandName, LocalProject, MachineDetails, MachineProject, MachineView, PortView, Setup, UiState } from "./types";
+import type { BoatSandbox, ClientToken, CommandArgs, CommandName, LocalProject, MachineDetails, MachineProject, MachineView, PortView, Setup, UiState } from "./types";
 
 const params = new URLSearchParams(location.search);
 
@@ -117,7 +118,7 @@ function seed(): UiState {
     account: { identifier: "you@example.com", plan: "Pro" },
     machines: structuredClone(machines),
     costs: { today: 0.42, month: 12.8, startsToday: 3, startsLimit: 50 },
-    settings: { startAtLogin: true, fleetRepo: null },
+    settings: { startAtLogin: true, fleetRepo: null, tailscaleHost: params.get("tailscale") === "1" ? TAILNET_HOST : null },
     githubUploads: { connected: params.get("uploads") === "1", login: params.get("uploads") === "1" ? "you" : null, everything: params.get("everything") === "1", code: null },
     mcp: params.get("mcp") === "mixed" ? { claudeCode: true, codex: null, antigravity: null } : { claudeCode: false, codex: false, antigravity: false },
     sizes: [
@@ -129,6 +130,24 @@ function seed(): UiState {
 }
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const TAILNET_HOST = "mybox.tail1234.ts.net";
+
+/** Looks like a QR code, scans as nothing: the real one comes from the backend. */
+function fakeQr(seed: string): string {
+  const n = 29;
+  let h = [...seed].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
+  const cells: string[] = [];
+  const finder = (x: number, y: number) =>
+    [0, n - 7].some((fx) => [0, n - 7].some((fy) => !(fx && fy) && x >= fx && x < fx + 7 && y >= fy && y < fy + 7));
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      h = (h * 1103515245 + 12345) >>> 0;
+      if (finder(x, y) || h % 2) cells.push(`M${x + 4} ${y + 4}h1v1h-1z`);
+    }
+  const w = n + 8;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${w}" viewBox="0 0 ${w} ${w}" shape-rendering="crispEdges"><rect width="${w}" height="${w}" fill="#fff"/><path fill="#000" d="${cells.join("")}"/></svg>`;
+}
 
 /** The mock, with T3 Code's side of a machine: what the real backend sees through its proxy. */
 export interface MockBackend extends Backend {
@@ -164,6 +183,16 @@ function create(): MockBackend {
     const m = state.machines.find((x) => x.id === id);
     if (!m) throw "machine not found";
     return m;
+  };
+
+  const now = Math.floor(Date.now() / 1000);
+  const clientTokens: Record<string, ClientToken[]> = {
+    sb_7f2a: [
+      { id: "a1b2c3d4e5f60718", label: null, tailnet: false, createdAt: now - 9 * 86400, expiresAt: null },
+      ...(params.get("tailscale") === "1"
+        ? [{ id: "f0e1d2c3b4a59687", label: "iPhone", tailnet: true, createdAt: now - 2 * 86400, expiresAt: now + 28 * 86400 }]
+        : []),
+    ],
   };
 
   const setupOrder: Setup[] = ["installBoat", "signInBoat", "installT3", "ready"];
@@ -335,6 +364,31 @@ function create(): MockBackend {
       find(id);
       await wait(1200);
       patch(id, { paired: true });
+    },
+
+    async pair_machine_tailnet({ id }) {
+      const m = find(id);
+      if (!state.settings.tailscaleHost) throw "Set this computer's Tailscale name in Settings first";
+      await wait(900);
+      const url = `https://${state.settings.tailscaleHost}:47731/pair#token=mock-${m.name}-${Date.now().toString(36)}`;
+      return { url, svg: fakeQr(url) };
+    },
+
+    async detect_tailscale_host() {
+      await wait(500);
+      return TAILNET_HOST;
+    },
+
+    async list_client_tokens({ id }) {
+      find(id);
+      return structuredClone(clientTokens[id] ?? []);
+    },
+
+    async revoke_client_token({ id, tokenId }) {
+      const tokens = clientTokens[id] ?? [];
+      clientTokens[id] = tokens.filter((t) => t.id !== tokenId);
+      emit();
+      return clientTokens[id].length !== tokens.length;
     },
 
     async delete_machine({ id, discard }) {

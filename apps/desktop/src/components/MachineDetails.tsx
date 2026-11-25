@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { call, errorText, useMachineDetails, useLatestThread } from "../api";
-import type { MachineDetails as Details, LocalProject, MachineView, PortView, Size } from "../types";
+import type { ClientToken, MachineDetails as Details, LocalProject, MachineView, PortView, Size, TailnetPairing } from "../types";
 import {
   ACTIONS,
   autoSleep,
@@ -33,6 +33,8 @@ import { SubHeader } from "./SubHeader";
 interface Props {
   machine: MachineView;
   sizes: Size[];
+  /** this computer's Tailscale name; null: phones can't pair over the tailnet */
+  tailscaleHost: string | null;
   /** latest UiState; every new one triggers a details refetch */
   version: unknown;
   pending: string | null;
@@ -51,6 +53,7 @@ interface Props {
 export function MachineDetails({
   machine: m,
   sizes,
+  tailscaleHost,
   version,
   pending,
   deleteError,
@@ -79,7 +82,9 @@ export function MachineDetails({
         <Glance m={m} size={sizeOf(sizes, m.size)} d={d} />
         {gone ? null : <Power m={m} busy={busy} onAction={onAction} />}
         <Agents m={m} d={d} pending={pending} onAction={onAction} />
-        <Connect m={m} d={d} pending={pending} onAction={onAction} />
+        <Connect m={m} d={d} pending={pending} onAction={onAction}>
+          <TailnetDevices m={m} tailscaleHost={tailscaleHost} version={version} onError={onFailed} />
+        </Connect>
         <Projects m={m} pickProject={pickProject} onAddProject={onAddProject} />
         {gone ? null : <Ports m={m} d={d} onError={onFailed} />}
         <MachineMore
@@ -345,11 +350,14 @@ function Connect({
   d,
   pending,
   onAction,
+  children,
 }: {
   m: MachineView;
   d: Details | null;
   pending: string | null;
   onAction: (a: Action) => void;
+  /** other ways in, after T3 Connect */
+  children?: ReactNode;
 }) {
   const running = pending === ACTIONS.connect.busy;
   return (
@@ -389,8 +397,136 @@ function Connect({
         ) : (
           <Skeleton rows={1} />
         )}
+        {children}
       </ul>
     </Section>
+  );
+}
+
+/**
+ * Pairing a phone over the tailnet with a QR code, and the devices paired that way. Revoking one
+ * unpairs that device only.
+ */
+function TailnetDevices({
+  m,
+  tailscaleHost,
+  version,
+  onError,
+}: {
+  m: MachineView;
+  tailscaleHost: string | null;
+  /** latest UiState: a device pairing or a revoke arrives as a new one */
+  version: unknown;
+  onError: (text: string) => void;
+}) {
+  const [devices, setDevices] = useState<ClientToken[]>([]);
+  const [pairing, setPairing] = useState<(TailnetPairing & { before: string[] }) | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const fail = (e: unknown) => onError(errorText(e));
+
+  useEffect(() => {
+    let live = true;
+    call("list_client_tokens", { id: m.id }).then(
+      (tokens) => live && setDevices(tokens.filter((t) => t.tailnet)),
+      () => {}, // the details view already reports a machine it can't read
+    );
+    return () => {
+      live = false;
+    };
+  }, [m.id, version]);
+
+  // the phone paired: the code is spent, so the QR code goes
+  useEffect(() => {
+    if (pairing && devices.some((t) => !pairing.before.includes(t.id))) setPairing(null);
+  }, [pairing, devices]);
+
+  const pair = () => {
+    setStarting(true);
+    call("pair_machine_tailnet", { id: m.id })
+      .then((p) => setPairing({ ...p, before: devices.map((t) => t.id) }), fail)
+      .finally(() => setStarting(false));
+  };
+  const copy = () =>
+    navigator.clipboard.writeText(pairing?.url ?? "").then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }, fail);
+
+  return (
+    <>
+      {tailscaleHost ? (
+        <li className="line">
+          <span className="line-main">Phone on your tailnet</span>
+          {pairing ? (
+            <button className="btn btn-link" onClick={() => setPairing(null)}>
+              Done
+            </button>
+          ) : (
+            <button
+              className="btn btn-sm btn-outline"
+              disabled={starting || m.state === "missing"}
+              aria-busy={starting}
+              onClick={pair}
+            >
+              {starting ? (
+                <>
+                  <Dots /> Starting…
+                </>
+              ) : (
+                "Pair phone"
+              )}
+            </button>
+          )}
+        </li>
+      ) : null}
+      {pairing ? (
+        <li className="line pair-qr">
+          <img src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(pairing.svg)}`} alt="QR code of the pairing link" />
+          <span className="hint">
+            Scan this QR code or paste the link in T3 Mobile's Add environment screen (not in a browser). It works once,
+            within 15 minutes. If the phone's T3 Code already has this machine through T3 Connect, remove it there first,
+            or add this link to it as another route.
+          </span>
+          <div className="port-share">
+            <span className="caption selectable port-host" title={pairing.url}>
+              {new URL(pairing.url).host}
+            </span>
+            <button className="btn btn-link" onClick={copy}>
+              {copied ? "Copied" : "Copy link"}
+            </button>
+          </div>
+        </li>
+      ) : null}
+      {devices.map((t) => (
+        <TailnetDevice key={t.id} id={m.id} t={t} onError={onError} />
+      ))}
+    </>
+  );
+}
+
+function TailnetDevice({ id, t, onError }: { id: string; t: ClientToken; onError: (text: string) => void }) {
+  const [armed, arm] = useArmed();
+  const [revoking, setRevoking] = useState(false);
+  const revoke = () => {
+    setRevoking(true);
+    call("revoke_client_token", { id, tokenId: t.id })
+      .catch((e) => onError(errorText(e)))
+      .finally(() => setRevoking(false));
+  };
+  return (
+    <li className="line">
+      <span className="line-main">{t.label ?? "Device"}</span>
+      {t.createdAt ? <span className="caption">paired {shortDate(t.createdAt)}</span> : null}
+      <button
+        className={`btn btn-link${armed ? " is-danger" : ""}`}
+        disabled={revoking}
+        aria-busy={revoking}
+        onClick={() => arm(revoke)}
+      >
+        {revoking ? <Dots /> : armed ? "Confirm" : "Revoke"}
+      </button>
+    </li>
   );
 }
 

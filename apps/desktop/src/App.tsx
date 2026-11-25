@@ -211,6 +211,7 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
           key={selected.id}
           machine={selected}
           sizes={state.sizes}
+          tailscaleHost={state.settings.tailscaleHost ?? null}
           version={state}
           pending={pending[machineKey(selected)] ?? null}
           deleteError={deleteErrors[machineKey(selected)] ?? null}

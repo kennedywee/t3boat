@@ -78,6 +78,7 @@ enum Call {
     SetAutoSleep { machine: String, on: bool },
     OpenInT3 { machine: String },
     AddToT3 { machine: String },
+    PairPhone { machine: String },
     DeleteMachine {
         machine: String,
         #[serde(default)]
@@ -332,6 +333,16 @@ fn tool_list() -> Value {
             &["machine"],
         ),
         tool(
+            "pair_phone",
+            "Returns a one-time URL that pairs a phone (or another device on the user's tailnet) with \
+             the machine: the user pastes or scans it in T3 Mobile's Add environment screen (not in a \
+             browser). Needs Tailscale on both and this computer's Tailscale name set in t3boat's \
+             settings; puts the machine on the tailnet with Tailscale Serve. Replaces an earlier URL \
+             not yet used.",
+            json!({ "machine": machine }),
+            &["machine"],
+        ),
+        tool(
             "delete_machine",
             "Permanently deletes a machine and everything on it, including work not pushed anywhere. Ask \
              the user first. Refuses while an agent or build is working there; `discard: true` deletes \
@@ -485,6 +496,17 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
             let m = app.machine(&machine)?;
             app.pair(&m)?;
             format!("T3 Code now asks the user to add {}; tell them to confirm.", m.record().name)
+        }
+        Call::PairPhone { machine } => {
+            let m = app.machine(&machine)?;
+            let url = app.pair_tailnet(&m).await?;
+            format!(
+                "Paste this URL in T3 Mobile's Add environment screen (not in a browser) to pair it with {}; \
+                 it works once, within 15 minutes:\n{url}\n\
+                 If the phone's T3 Code already lists {0} through T3 Connect, both entries share one \
+                 environment id: remove that entry first, or add this URL to it as another route.",
+                m.record().name
+            )
         }
         Call::DeleteMachine { machine, discard } => {
             let m = app.machine(&machine)?;
@@ -740,8 +762,8 @@ mod tests {
     async fn lists_tools_and_rejects_unknown_methods() {
         let tools = rpc("tools/list", json!({})).await["result"]["tools"].clone();
         let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 17);
-        assert!(names.contains(&"sign_in_agent") && names.contains(&"delete_machine"));
+        assert_eq!(names.len(), 18);
+        assert!(["sign_in_agent", "pair_phone", "delete_machine"].iter().all(|n| names.contains(n)));
         assert_eq!(rpc("ping", json!({})).await["result"], json!({}));
         assert_eq!(rpc("resources/list", json!({})).await["error"]["code"], -32601);
     }
