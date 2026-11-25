@@ -199,6 +199,7 @@ impl App {
                 .build()?,
             client: proxy::auth::random_token(),
             last_client_activity: Mutex::new(std::time::Instant::now()),
+            stopping: std::sync::atomic::AtomicBool::new(false),
         });
         let app = Arc::new(Self {
             shared,

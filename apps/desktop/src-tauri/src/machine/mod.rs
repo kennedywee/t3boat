@@ -145,6 +145,8 @@ pub struct Shared {
     /// When a client last used any machine through this app: a paired device, an agent over
     /// MCP. Starts at the app's start.
     pub last_client_activity: Mutex<Instant>,
+    /// True once the mothership commits to `boat stop self`, blocking new wakes and MCP work.
+    pub stopping: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -173,6 +175,12 @@ impl Shared {
     /// Since the last client activity, or since the start if none.
     pub fn idle_for(&self) -> Duration {
         self.last_client_activity.lock().unwrap().elapsed()
+    }
+    pub fn set_stopping(&self, stopping: bool) {
+        self.stopping.store(stopping, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -441,7 +449,13 @@ impl MachineRuntime {
     /// Brings the machine up if needed and returns once its T3 server answers and will stay up.
     /// Concurrent callers share one wake.
     pub async fn ensure_awake(&self) -> Result<()> {
+        if self.shared.is_stopping() {
+            bail!("t3boatd is going to sleep");
+        }
         let _guard = self.waking.lock().await;
+        if self.shared.is_stopping() {
+            bail!("t3boatd is going to sleep");
+        }
         // Checked under the lock: a delete holding it retires the machine.
         if self.power() == Power::Missing {
             bail!("the sandbox no longer exists on Boat");

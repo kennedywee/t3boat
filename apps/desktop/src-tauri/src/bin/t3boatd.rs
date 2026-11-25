@@ -271,14 +271,18 @@ async fn auto_sleep(app: &App, idle_secs: u64, flush: &Flush) {
             tracing::error!("auto-sleep: saving state/caches failed ({e:#}); skipping stop");
             continue;
         }
-        // Recheck immediately before stopping so activity or a worker wake during flush cancels it.
+        // Gate new wakes/MCP work before the final activity check so nothing can start a worker
+        // while `boat stop self` is running.
+        app.shared.set_stopping(true);
         if !should_sleep(&app.activity(), idle_secs, DUE_GUARD_SECS) {
+            app.shared.set_stopping(false);
             tracing::info!("auto-sleep: activity arrived during flush; staying awake");
             continue;
         }
         match app.shared.boat.stop_self().await {
             Ok(()) => return,
             Err(e) => {
+                app.shared.set_stopping(false);
                 tracing::error!("auto-sleep: {e:#}; resetting idle window and trying again");
                 app.shared.touch_activity();
             }
