@@ -55,6 +55,25 @@ if ! git config --global user.email >/dev/null 2>&1; then
   fi
 fi
 
+# mise, so a project's mise.toml or .tool-versions gets its tools. Installed once, when missing; a
+# failed install leaves the machine without it and is tried again at the next upgrade. Its shims go
+# on PATH in ~/.profile (login shells, interactive or not) and ~/.bashrc (interactive shells: past
+# its guard, so T3's terminals). T3 reads PATH from `bash -ilc` as it starts, so a change here
+# restarts it, and its agents find the tools.
+if [ ! -x "$HOME/.local/bin/mise" ]; then
+  curl -fsSL https://mise.run | MISE_INSTALL_PATH="$HOME/.local/bin/mise" sh >"$boat_dir/mise-install.log" 2>&1 \
+    || echo "mise install failed: see $boat_dir/mise-install.log" >&2
+fi
+mise_path='# t3boat mise START
+case ":$PATH:" in *":$HOME/.local/share/mise/shims:"*) ;; *) export PATH="$HOME/.local/share/mise/shims:$PATH" ;; esac
+# t3boat mise END'
+for rc in "$HOME/.profile" "$HOME/.bashrc"; do
+  if ! grep -qF '# t3boat mise START' "$rc" 2>/dev/null; then
+    printf '\n%s\n' "$mise_path" >>"$rc"
+    restart_t3=1
+  fi
+done
+
 # t3boat retries it by itself: a failure here must not fail the machine.
 bash "$here/gh-uploads.sh" || echo "GitHub uploads not set up yet" >&2
 unset T3BOAT_GH_UPLOAD_TOKEN
