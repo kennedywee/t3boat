@@ -176,13 +176,17 @@ impl MachineRuntime {
     /// most recently used first; a chat that is not stored wakes the machine when opened, and
     /// is fetched on a later sleep.
     async fn store_threads(&self, manifest: &Manifest, shell: &Value, deadline: tokio::time::Instant) {
-        // T3 Code opened no chat through this proxy yet: nothing says how to encode them.
-        let Some(flags) = self.cache.lock().unwrap().thread_encoding else { return };
-        let wanted = threads::plan(&self.dir, shell, &manifest.threads, flags, chrono::Utc::now());
+        // Every encoding a client asked for, so each kind of client opens chats while asleep.
+        // None yet: T3 Code opened no chat through this proxy, nothing says how to encode them.
+        let encodings = self.cache.lock().unwrap().thread_encodings.clone();
+        if encodings.is_empty() {
+            return;
+        }
+        let wanted = threads::plan(&self.dir, shell, &manifest.threads, &encodings, chrono::Utc::now());
         let missing = wanted.iter().filter(|w| !w.path.exists());
         let fetches = futures_util::stream::iter(missing).for_each_concurrent(THREAD_FETCHES, |w| async move {
             let stored = async {
-                crate::store::write_private(&w.path, &self.fetch_thread(w.thread, w.sequence, flags).await?)
+                crate::store::write_private(&w.path, &self.fetch_thread(w.thread, w.sequence, w.flags).await?)
             };
             if let Err(e) = stored.await {
                 tracing::warn!("storing chat {} of {}: {e:#}", w.thread, self.id());

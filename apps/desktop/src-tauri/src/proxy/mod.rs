@@ -15,15 +15,16 @@ use anyhow::Result;
 use axum::body::Body;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path, Query, RawQuery, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Form, Json, Router};
-use auth::TicketUse;
+use auth::{Call, Reach, TicketUse};
 use cache::Shell;
+use crate::store::ClientToken;
 use threads::ThreadFlags;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -31,8 +32,6 @@ use std::sync::Arc;
 
 type M = State<Arc<MachineRuntime>>;
 
-/// Ten years: the proxy's own tokens never make T3 Code re-pair.
-const CLIENT_TOKEN_TTL_SECS: i64 = 10 * 365 * 24 * 3600;
 /// A T3 server linking to the machine gives its descriptor 3 s on loopback. The refresh from a
 /// running machine gets half of that; the last one seen answers after it.
 const DESCRIPTOR_REFRESH: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -59,7 +58,7 @@ pub async fn serve(machine: Arc<MachineRuntime>) -> Result<()> {
         .route("/api/observability/v1/traces", post(traces))
         .fallback(fallback)
         .layer(middleware::from_fn(cors))
-        .layer(middleware::from_fn(local_host_only))
+        .layer(middleware::from_fn_with_state(machine.clone(), local_host_only))
         .with_state(machine);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     axum::serve(listener, app).await?;
@@ -67,14 +66,26 @@ pub async fn serve(machine: Arc<MachineRuntime>) -> Result<()> {
 }
 
 /// Web pages can reach 127.0.0.1 too, through DNS rebinding; only requests addressed to this
-/// computer by name are T3 Code's.
-async fn local_host_only(req: Request, next: Next) -> Response {
+/// computer by name are T3 Code's: loopback, or its Tailscale name when one is set, which
+/// Tailscale Serve passes on. The request carries which, for the auth checks.
+async fn local_host_only(State(m): M, mut req: Request, next: Next) -> Response {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or_default();
-    let name = host.rsplit_once(':').map_or(host, |(name, _)| name);
-    if !matches!(name, "localhost" | "127.0.0.1" | "[::1]") {
+    let forwarded = auth::is_forwarded(req.headers());
+    let reach = match auth::reach(host, forwarded, tailscale_host(&m).as_deref()) {
+        // Linking is for T3 servers on this computer: see `link::route`.
+        Some(Reach::Tailnet) if link::route(req.uri().path()) => None,
+        reach => reach,
+    };
+    let Some(reach) = reach else {
         return StatusCode::FORBIDDEN.into_response();
-    }
+    };
+    req.extensions_mut().insert(reach);
     next.run(req).await
+}
+
+/// This computer's Tailscale name, if set and valid.
+fn tailscale_host(m: &MachineRuntime) -> Option<String> {
+    m.shared.settings.read().unwrap().tailscale_host.as_deref().and_then(crate::store::normalize_tailscale_host)
 }
 
 /// The renderer runs at `t3code://app`; the real server allows any origin, so does the proxy.
@@ -99,8 +110,43 @@ async fn cors(req: Request, next: Next) -> Response {
     res
 }
 
-fn client_authorized(m: &MachineRuntime, headers: &HeaderMap) -> bool {
-    auth::client_token(headers).is_some_and(|t| m.record().client_tokens.iter().any(|c| c == t))
+fn now_secs() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// The paired device making `call`, if its credentials hold.
+fn client(m: &MachineRuntime, call: &Call) -> Option<ClientToken> {
+    m.auth.authorize(&m.record().client_tokens, call, now_secs()).cloned()
+}
+
+fn client_authorized(m: &MachineRuntime, parts: &Parts) -> bool {
+    client(m, &Call::of(parts)).is_some()
+}
+
+impl MachineRuntime {
+    /// The devices paired with this machine's proxy.
+    pub fn client_tokens(&self) -> Vec<ClientToken> {
+        self.record().client_tokens
+    }
+
+    /// Whether `id` is still a live, unrevoked client token on this machine.
+    pub fn is_client_token_active(&self, id: &str, now: i64) -> bool {
+        self.with_record(|r| r.client_tokens.iter().any(|t| t.id == id && !t.expired(now)))
+    }
+
+    /// Unpairs one device: its token, tickets, and open sockets stop working at once.
+    /// `false`: no token has `id`.
+    pub fn revoke_client_token(&self, id: &str) -> bool {
+        self.mutate_record(|r| {
+            let revoked = auth::revoke(&mut r.client_tokens, id);
+            if revoked {
+                // Clear tickets and notify listeners while holding the record write lock so an
+                // in-flight ticket request cannot insert a ticket after revocation clears the map.
+                self.auth.revoke_device(id);
+            }
+            (revoked, revoked)
+        })
+    }
 }
 
 fn unauthorized() -> Response {
@@ -109,6 +155,12 @@ fn unauthorized() -> Response {
 
 fn iso_in(secs: i64) -> String {
     (chrono::Utc::now() + chrono::TimeDelta::seconds(secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn iso_at(unix_secs: i64) -> String {
+    chrono::DateTime::from_timestamp(unix_secs, 0)
+        .unwrap_or_default()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 async fn descriptor(State(m): M) -> Response {
@@ -127,13 +179,82 @@ async fn descriptor(State(m): M) -> Response {
     }
 }
 
-async fn oauth_token(State(m): M, Form(form): Form<HashMap<String, String>>) -> Response {
-    let code = form.get("subject_token").map(String::as_str).unwrap_or_default();
-    if !m.auth.redeem_pairing_code(code) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"}))).into_response();
+/// Pairs a device with a one-time code. Through the tailnet the device must send a DPoP proof,
+/// and its token is bound to the proof's key. A bound token also renews itself here, with a
+/// proof of its key, before it expires.
+async fn oauth_token(State(m): M, parts: Parts, Form(form): Form<HashMap<String, String>>) -> Response {
+    let call = Call::of(&parts);
+    let now = now_secs();
+    let tailnet = call.reach == Reach::Tailnet;
+    let proof = match call.verify_proof(now) {
+        Ok(proof) => proof,
+        // On loopback the proof never mattered for pairing: only a renewal needs it.
+        Err(_) if !tailnet => None,
+        Err(e) => return invalid_dpop_proof(&e.to_string()),
+    };
+    if tailnet && proof.is_none() {
+        return invalid_dpop_proof("a DPoP proof is required");
     }
-    let token = auth::random_token();
-    m.update_record(|r| r.client_tokens.push(token.clone()));
+    let subject = form.get("subject_token").map(String::as_str).unwrap_or_default();
+    let client_label: Option<String> = form.get("client_label").map(|l| l.chars().take(100).collect());
+    let fresh_token = auth::random_token();
+
+    // Try atomic renewal first under the record lock so concurrent renewals or a race with
+    // revocation cannot both succeed, resurrect a revoked device, or persist on a miss.
+    // Proof jti is only recorded for eligible exchanges so unpaired callers cannot grow the cache.
+    let renewal_result: Result<Option<ClientToken>, &'static str> = match &proof {
+        Some(p) => m.mutate_record(|r| {
+            let pos = r
+                .client_tokens
+                .iter()
+                .position(|t| t.jkt.as_deref() == Some(p.jkt.as_str()) && auth::same_secret(&t.token, subject) && !t.expired(now));
+            let Some(pos) = pos else {
+                return (false, Ok(None));
+            };
+            if !m.auth.record_jti(&p.jkt, &p.jti, now) {
+                return (false, Err("replayed jti"));
+            }
+            let old = r.client_tokens.remove(pos);
+            r.client_tokens.retain(|t| !t.expired(now));
+            let issued = ClientToken::renewed(
+                old.id,
+                fresh_token.clone(),
+                old.label,
+                old.jkt,
+                now,
+                auth::TAILNET_TOKEN_TTL_SECS,
+            );
+            r.client_tokens.push(issued.clone());
+            (true, Ok(Some(issued)))
+        }),
+        None => Ok(None),
+    };
+
+    let (issued, was_renewed) = match renewal_result {
+        Err(why) => return invalid_dpop_proof(why),
+        Ok(Some(issued)) => (issued, true),
+        Ok(None) => {
+            if let Err(err) = m.auth.redeem_pairing_code_with_proof(subject, proof.as_ref(), now) {
+                return if err == "invalid_grant" {
+                    (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"}))).into_response()
+                } else {
+                    invalid_dpop_proof(err)
+                };
+            }
+            let jkt = proof.filter(|_| tailnet).map(|p| p.jkt);
+            let ttl = if jkt.is_some() { auth::TAILNET_TOKEN_TTL_SECS } else { auth::LOOPBACK_TOKEN_TTL_SECS };
+            let issued = ClientToken::new(fresh_token, client_label, jkt, now, ttl);
+            m.update_record(|r| {
+                r.client_tokens.retain(|t| !t.expired(now));
+                r.client_tokens.push(issued.clone());
+            });
+            (issued, false)
+        }
+    };
+
+    let token = issued.token.clone();
+    let token_type = if issued.jkt.is_some() { "DPoP" } else { "Bearer" };
+    let ttl = if issued.jkt.is_some() { auth::TAILNET_TOKEN_TTL_SECS } else { auth::LOOPBACK_TOKEN_TTL_SECS };
     let session = m.cache.lock().unwrap().auth_session.clone().unwrap_or_default();
     let scope = session
         .get("scopes")
@@ -143,25 +264,34 @@ async fn oauth_token(State(m): M, Form(form): Form<HashMap<String, String>>) -> 
     let mut body = json!({
         "access_token": token,
         "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
-        "token_type": "Bearer",
-        "expires_in": CLIENT_TOKEN_TTL_SECS,
+        "token_type": token_type,
+        "expires_in": ttl,
         "scope": scope,
     });
     if let Some(p) = session.get("permissions") {
         body["permissions"] = p.clone();
     }
-    tracing::info!("T3 Code paired with {}", m.id());
+    if was_renewed {
+        tracing::info!("T3 Code renewed its token for {}", m.id());
+    } else {
+        tracing::info!("T3 Code paired with {} ({call_reach:?})", m.id(), call_reach = call.reach);
+    }
     Json(body).into_response()
 }
 
-async fn auth_session(State(m): M, headers: HeaderMap) -> Response {
-    if !client_authorized(&m, &headers) {
+fn invalid_dpop_proof(why: &str) -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_dpop_proof", "error_description": why}))).into_response()
+}
+
+async fn auth_session(State(m): M, parts: Parts) -> Response {
+    let Some(token) = client(&m, &Call::of(&parts)) else {
         return unauthorized();
-    }
+    };
     let cached = m.cache.lock().unwrap().auth_session.clone();
     match cached {
         Some(mut s) => {
-            s.insert("expiresAt".into(), Value::String(iso_in(CLIENT_TOKEN_TTL_SECS)));
+            let expires = token.expires_at.map_or_else(|| iso_in(auth::LOOPBACK_TOKEN_TTL_SECS), iso_at);
+            s.insert("expiresAt".into(), Value::String(expires));
             Json(s).into_response()
         }
         None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -170,27 +300,47 @@ async fn auth_session(State(m): M, headers: HeaderMap) -> Response {
 
 /// The proxy's own tickets, for the RPC socket and for media streams alike: asking for one
 /// never reaches the machine.
-async fn ticket(State(m): M, Path(opens): Path<TicketUse>, headers: HeaderMap) -> Response {
-    if !client_authorized(&m, &headers) {
+async fn ticket(State(m): M, Path(opens): Path<TicketUse>, parts: Parts) -> Response {
+    let call = Call::of(&parts);
+    let Some(token) = client(&m, &call) else {
         return unauthorized();
-    }
-    let (ticket, ttl) = m.auth.issue_ticket(opens);
+    };
+    let now = now_secs();
+    // Issue under the record read lock so revocation (under the write lock) cannot race with
+    // inserting a ticket for a device that was just revoked.
+    let issued = m.with_record(|r| {
+        r.client_tokens
+            .iter()
+            .any(|t| t.id == token.id && !t.expired(now))
+            .then(|| m.auth.issue_ticket(opens, call.reach, &token))
+    });
+    let Some((ticket, ttl)) = issued else {
+        return unauthorized();
+    };
     Json(json!({"ticket": ticket, "expiresAt": iso_in(ttl.as_secs() as i64)})).into_response()
 }
 
-async fn ws(State(m): M, RawQuery(query): RawQuery, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Response {
-    let query = query.unwrap_or_default();
-    let ticket = query_param(&query, "wsTicket");
-    let ok = ticket.is_some_and(|t| m.auth.check_ticket(&t, TicketUse::Rpc)) || client_authorized(&m, &headers);
-    if !ok {
+async fn ws(State(m): M, parts: Parts, upgrade: WebSocketUpgrade) -> Response {
+    let call = Call::of(&parts);
+    let now = now_secs();
+    let query = parts.uri.query().unwrap_or_default().to_owned();
+    // Subscribe before checking active state so a revocation landing during upgrade is never missed.
+    let revoked = m.auth.subscribe_revoked();
+    let token_id = query_param(&query, "wsTicket")
+        .and_then(|t| m.auth.check_ticket(&t, TicketUse::Rpc, &call, now))
+        .or_else(|| client(&m, &call).map(|t| t.id));
+    let Some(token_id) = token_id else {
+        return unauthorized();
+    };
+    if !m.is_client_token_active(&token_id, now) {
         return unauthorized();
     }
-    upgrade.on_upgrade(move |socket| session::run(m, socket, query))
+    upgrade.on_upgrade(move |socket| session::run(m, socket, query, token_id, revoked))
 }
 
 /// The HTTP shell snapshot T3 Code loads on start: answered from the capture while asleep.
 async fn shell_snapshot(State(m): M, Query(q): Query<HashMap<String, String>>, req: Request) -> Response {
-    if !client_authorized(&m, req.headers()) {
+    if client(&m, &Call::of_request(&req)).is_none() {
         return unauthorized();
     }
     // Right after the app starts the power is not known yet: the capture would look stale, and
@@ -204,7 +354,7 @@ async fn shell_snapshot(State(m): M, Query(q): Query<HashMap<String, String>>, r
             None => {}
         }
     }
-    forward(State(m), req).await
+    forward_authorized(m, req, true).await
 }
 
 /// The HTTP snapshot T3 Code opens a chat with: answered from the thread store while asleep.
@@ -214,24 +364,24 @@ async fn thread_snapshot(
     Query(q): Query<HashMap<String, String>>,
     req: Request,
 ) -> Response {
-    if !client_authorized(&m, req.headers()) {
+    if client(&m, &Call::of_request(&req)).is_none() {
         return unauthorized();
     }
     let flags = ThreadFlags::from_query(&q);
+    m.cache.lock().unwrap().see_thread_encoding(flags);
     // As for the shell: the capture counts once the power is known.
     m.settled_power().await;
     if let Some(body) = m.fresh_capture().and_then(|c| m.stored_thread(&c, &thread, flags)) {
         return ([(header::CONTENT_TYPE, "application/json")], body).into_response();
     }
-    m.cache.lock().unwrap().thread_encoding = Some(flags);
-    forward(State(m), req).await
+    forward_authorized(m, req, true).await
 }
 
 /// The voice status T3 Code reads on its own as it starts, when this machine takes its
 /// dictation. A mic click reads the same, so it is answered as last seen while asleep and wakes
 /// the machine only when never seen.
 async fn voice_status(State(m): M, mut req: Request) -> Response {
-    if !client_authorized(&m, req.headers()) {
+    if client(&m, &Call::of_request(&req)).is_none() {
         return unauthorized();
     }
     if m.settled_power().await != Power::Running
@@ -241,7 +391,7 @@ async fn voice_status(State(m): M, mut req: Request) -> Response {
     }
     // The answer is read here, so it must come uncompressed.
     req.headers_mut().remove(header::ACCEPT_ENCODING);
-    let answer = forward(State(m.clone()), req).await;
+    let answer = forward_authorized(m.clone(), req, true).await;
     if answer.status() != StatusCode::OK {
         return answer;
     }
@@ -325,10 +475,20 @@ async fn forward(State(m): M, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let url_token = URL_TOKEN_ROUTES.iter().any(|r| parts.uri.path().starts_with(r));
     let bearer = parts.headers.contains_key(header::AUTHORIZATION);
-    let authorized = client_authorized(&m, &parts.headers);
+    let authorized = client_authorized(&m, &parts);
     if (bearer || !url_token) && !authorized {
         return unauthorized();
     }
+    forward_parts(m, parts, body, authorized).await
+}
+
+async fn forward_authorized(m: Arc<MachineRuntime>, req: Request, authorized: bool) -> Response {
+    let (parts, body) = req.into_parts();
+    forward_parts(m, parts, body, authorized).await
+}
+
+async fn forward_parts(m: Arc<MachineRuntime>, parts: Parts, body: Body, authorized: bool) -> Response {
+    let bearer = parts.headers.contains_key(header::AUTHORIZATION);
     if authorized && parts.method == Method::POST {
         m.user_action();
     }

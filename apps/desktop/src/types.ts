@@ -53,6 +53,8 @@ export interface Settings {
   startAtLogin: boolean;
   /** GitHub owner/name of the fleet repo every machine clones and installs once; null for none */
   fleetRepo: string | null;
+  /** This computer's Tailscale MagicDNS name (mybox.tailnet.ts.net) the proxies also answer to; null for loopback only */
+  tailscaleHost?: string | null;
 }
 
 export interface Size {

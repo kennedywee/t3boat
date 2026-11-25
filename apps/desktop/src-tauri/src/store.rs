@@ -2,7 +2,7 @@
 //! data dir.
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -39,8 +39,10 @@ pub struct Machine {
     #[serde(default)]
     pub gh_uploads_revision: Option<String>,
     pub environment_id: String,
-    /// Bearer tokens the proxy issued to T3 Code when it paired.
-    pub client_tokens: Vec<String>,
+    /// Tokens the proxy issued to T3 Code when it paired, one per device. Read from the plain
+    /// strings earlier versions stored as well.
+    #[serde(deserialize_with = "client_tokens")]
+    pub client_tokens: Vec<ClientToken>,
     /// Bearer tokens the machine's server issued to T3 servers that linked to it through the
     /// proxy. The proxy only recognizes them: a call bearing one may wake the machine.
     pub link_tokens: Vec<LinkToken>,
@@ -58,6 +60,78 @@ pub struct Machine {
     /// Ports with a Boat link: an HTTPS address of their own, for any device.
     #[serde(default)]
     pub links: Vec<PortLink>,
+}
+
+/// A token the proxy issued to one T3 Code. Revoking it unpairs that device only.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientToken {
+    /// Names the token without giving it away: derived from it, so stable across versions.
+    pub id: String,
+    pub token: String,
+    /// What the device called itself when it paired (`client_label`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// RFC 7638 thumbprint of the DPoP key the token is bound to: every use must carry a proof
+    /// signed with that key. `None`: a bearer token, good on loopback only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jkt: Option<String>,
+    /// Unix seconds. 0: paired before tokens had metadata.
+    #[serde(default)]
+    pub created_at: i64,
+    /// Unix seconds. `None`: never.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+}
+
+impl ClientToken {
+    pub fn new(token: String, label: Option<String>, jkt: Option<String>, created_at: i64, ttl_secs: i64) -> Self {
+        Self { id: client_token_id(&token), token, label, jkt, created_at, expires_at: Some(created_at + ttl_secs) }
+    }
+
+    /// Replaces the secret of an existing device token on renewal, keeping its stable device `id`.
+    pub fn renewed(
+        id: String,
+        token: String,
+        label: Option<String>,
+        jkt: Option<String>,
+        created_at: i64,
+        ttl_secs: i64,
+    ) -> Self {
+        Self { id, token, label, jkt, created_at, expires_at: Some(created_at + ttl_secs) }
+    }
+
+    /// A token stored as a plain string by an earlier version: loopback, unbound, no expiry.
+    pub fn legacy(token: String) -> Self {
+        Self { id: client_token_id(&token), token, label: None, jkt: None, created_at: 0, expires_at: None }
+    }
+
+    /// `now`: unix seconds.
+    pub fn expired(&self, now: i64) -> bool {
+        self.expires_at.is_some_and(|at| at <= now)
+    }
+}
+
+/// The first 8 bytes of the token's SHA-256, in hex.
+fn client_token_id(token: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(token.as_bytes())[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn client_tokens<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<ClientToken>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Full(ClientToken),
+        Legacy(String),
+    }
+    Ok(Vec::<Stored>::deserialize(d)?
+        .into_iter()
+        .map(|t| match t {
+            Stored::Full(t) => t,
+            Stored::Legacy(token) => ClientToken::legacy(token),
+        })
+        .collect())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -83,6 +157,9 @@ pub struct Settings {
     /// The user's fleet repo on GitHub (`owner/name`): skills and agent setup every machine clones
     /// and installs once with its `install.sh`. `None`: machines get no fleet.
     pub fleet_repo: Option<String>,
+    /// This computer's Tailscale MagicDNS name (`mybox.tailnet.ts.net`). The proxies answer
+    /// requests addressed to it as well as loopback ones, with stricter auth. `None`: loopback only.
+    pub tailscale_host: Option<String>,
 }
 
 /// The user's own GitHub login, which machines use for `gh` uploads, or with `everything` for all
@@ -99,7 +176,7 @@ pub struct GithubUploads {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { start_at_login: true, fleet_repo: None }
+        Self { start_at_login: true, fleet_repo: None, tailscale_host: None }
     }
 }
 
@@ -111,6 +188,81 @@ pub fn valid_fleet_repo(repo: &str) -> bool {
             && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     };
     matches!(repo.split_once('/'), Some((owner, name)) if ok(owner) && ok(name))
+}
+
+/// `host` as a Tailscale MagicDNS machine name, `machine.tailnet.ts.net`, lowercased. `None` for
+/// anything else: an IP, a port, a bare tailnet, another domain.
+pub fn normalize_tailscale_host(host: &str) -> Option<String> {
+    let host = host.trim().strip_suffix('.').unwrap_or(host.trim()).to_ascii_lowercase();
+    let label = |l: &&str| {
+        (1..=63).contains(&l.len())
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    };
+    let labels: Vec<&str> = host.split('.').collect();
+    (labels.len() == 4 && labels[2..] == ["ts", "net"] && labels.iter().all(label)).then_some(host)
+}
+
+#[cfg(test)]
+mod tailscale_host_tests {
+    use super::normalize_tailscale_host;
+
+    #[test]
+    fn accepts_only_a_magicdns_machine_name() {
+        assert_eq!(normalize_tailscale_host("mybox.tail1234.ts.net").as_deref(), Some("mybox.tail1234.ts.net"));
+        assert_eq!(normalize_tailscale_host(" MyBox.Tail-1234.TS.net. ").as_deref(), Some("mybox.tail-1234.ts.net"));
+        for bad in [
+            "",
+            "ts.net",
+            "tail1234.ts.net",
+            "a.b.c.ts.net",
+            "mybox.tail1234.ts.net.evil.com",
+            "mybox.tail1234.ts.net:443",
+            "mybox.tail1234.ts.com",
+            "-box.tail1234.ts.net",
+            "my_box.tail1234.ts.net",
+            "my box.tail1234.ts.net",
+            "100.64.0.1",
+            "mybox..ts.net",
+        ] {
+            assert_eq!(normalize_tailscale_host(bad), None, "{bad}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod client_token_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_plain_tokens_of_earlier_versions() {
+        let json = r#"["old", {"id": "x", "token": "new", "label": "Phone", "jkt": "k", "createdAt": 5, "expiresAt": 9}]"#;
+        let mut d = serde_json::Deserializer::from_str(json);
+        let tokens = client_tokens(&mut d).unwrap();
+        assert_eq!(tokens[0], ClientToken::legacy("old".into()));
+        assert_eq!(tokens[0].id.len(), 16);
+        assert!(!tokens[0].expired(i64::MAX));
+        assert_eq!(tokens[1].label.as_deref(), Some("Phone"));
+        assert_eq!(tokens[1].jkt.as_deref(), Some("k"));
+        assert!(tokens[1].expired(9) && !tokens[1].expired(8));
+    }
+
+    #[test]
+    fn a_legacy_machine_record_loads_and_saves_with_metadata() {
+        let mut machine = serde_json::json!({
+            "id": "m", "sandboxId": "s", "name": "n", "size": "z", "upstreamUrl": "u", "upstreamToken": "t",
+            "watchdogUrl": "w", "watchdogSecret": "ws", "localPort": 4000, "t3Version": "v",
+            "provisionRevision": "r", "environmentId": "e", "clientTokens": ["tok"], "linkTokens": [], "createdAt": 1,
+        });
+        let m: Machine = serde_json::from_value(machine.clone()).unwrap();
+        assert_eq!(m.client_tokens, vec![ClientToken::legacy("tok".into())]);
+        let saved = serde_json::to_value(&m).unwrap();
+        machine["clientTokens"] = saved["clientTokens"].clone();
+        assert_eq!(saved["clientTokens"][0]["token"], "tok");
+        let again: Machine = serde_json::from_value(machine).unwrap();
+        assert_eq!(again, m);
+    }
 }
 
 #[cfg(test)]
