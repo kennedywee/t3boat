@@ -103,7 +103,13 @@ impl MachineRuntime {
             .forward(&id, port, port)
             .await
             .with_context(|| format!("forwarding port {port} for the {agent:?} login; finish or close another sign-in first"))?;
-        crate::app::open_url(&url)?;
+        #[cfg(not(feature = "desktop"))]
+        tracing::info!(
+            "{agent:?} on {}: forward the OAuth callback first (`ssh -L {port}:127.0.0.1:{port} <this-host>`), then open: {url}",
+            self.id()
+        );
+        #[cfg(feature = "desktop")]
+        crate::app::open_sign_in(&format!("{agent:?} on {}", self.id()), &url)?;
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
             if boat.exec(&id, agent.status(), 30).await?.exit_code == Some(0) {

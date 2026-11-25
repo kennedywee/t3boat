@@ -40,12 +40,19 @@ pub fn url() -> String {
     format!("http://127.0.0.1:{MCP_PORT}/mcp")
 }
 
-pub async fn serve(app: Arc<App>) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", MCP_PORT))
+pub async fn bind() -> Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(("127.0.0.1", MCP_PORT))
         .await
-        .with_context(|| format!("listening on port {MCP_PORT}"))?;
+        .with_context(|| format!("listening on port {MCP_PORT}"))
+}
+
+pub async fn serve_listener(listener: tokio::net::TcpListener, app: Arc<App>) -> Result<()> {
     axum::serve(listener, router(app)).await?;
     Ok(())
+}
+
+pub async fn serve(app: Arc<App>) -> Result<()> {
+    serve_listener(bind().await?, app).await
 }
 
 /// What `tools/call` runs; a trait so the protocol is testable without a real app.
@@ -79,6 +86,8 @@ enum Call {
     OpenInT3 { machine: String },
     AddToT3 { machine: String },
     PairPhone { machine: String },
+    OtherSandboxes {},
+    AdoptMachine { sandbox_id: String },
     DeleteMachine {
         machine: String,
         #[serde(default)]
@@ -190,9 +199,15 @@ fn tool_list() -> Value {
         ),
         tool(
             "create_machine",
-            "Creates a new remote machine with T3 Code on it. Takes about a minute. When it is ready, \
-             T3 Code shows the user a dialog to add it as a backend; tell the user to confirm it there. \
-             `projects` (ids from list_projects) are then added to it as add_project does.",
+            if cfg!(feature = "desktop") {
+                "Creates a new remote machine with T3 Code on it. Takes about a minute. When it is ready, \
+                 T3 Code shows the user a dialog to add it as a backend; tell the user to confirm it there. \
+                 `projects` (ids from list_projects) are then added to it as add_project does."
+            } else {
+                "Creates a new remote machine with T3 Code on it. Takes about a minute. When it is ready, \
+                 call pair_phone to pair it on your tailnet. `projects` (ids from list_projects) are then \
+                 added to it as add_project does."
+            },
             json!({
                 "name": { "type": "string", "description": "Unique machine name" },
                 "size": size("Defaults to default"),
@@ -254,9 +269,15 @@ fn tool_list() -> Value {
         ),
         tool(
             "sign_in_agent",
-            "Signs a coding agent in on a machine with the vendor's own login. Opens the sign-in page in \
-             the user's browser on this computer; the user must click Authorize there, so tell them to. \
-             The credential is created on the machine; this computer's logins are not touched.",
+            if cfg!(feature = "desktop") {
+                "Signs a coding agent in on a machine with the vendor's own login. Opens the sign-in page in \
+                 the user's browser on this computer; the user must click Authorize there, so tell them to. \
+                 The credential is created on the machine; this computer's logins are not touched."
+            } else {
+                "Signs a coding agent in on a machine with the vendor's own login. In headless mode, logs the \
+                 sign-in URL and the SSH callback-forwarding command (`ssh -L <port>:127.0.0.1:<port>`) to \
+                 the t3boatd log so the user can forward the callback port and authorize in a browser."
+            },
             json!({
                 "machine": machine,
                 "agent": { "type": "string", "enum": ["Claude", "Codex"] },
@@ -265,11 +286,18 @@ fn tool_list() -> Value {
         ),
         tool(
             "turn_on_connect",
-            "Turns on T3 Connect on a machine, so the user's other devices (the T3 Code phone app, a \
-             browser) reach it with their T3 account. Opens T3's sign-in page in the user's browser on \
-             this computer; the user must approve it there, so tell them to. Restarts T3 on the \
-             machine, so it refuses while an agent works there. A sleeping machine still wakes only \
-             through t3boat on this computer.",
+            if cfg!(feature = "desktop") {
+                "Turns on T3 Connect on a machine, so the user's other devices (the T3 Code phone app, a \
+                 browser) reach it with their T3 account. Opens T3's sign-in page in the user's browser on \
+                 this computer; the user must approve it there, so tell them to. Restarts T3 on the \
+                 machine, so it refuses while an agent works there. A sleeping machine still wakes only \
+                 through t3boat on this computer."
+            } else {
+                "Turns on T3 Connect on a machine, so the user's other devices reach it with their T3 \
+                 account. In headless mode, logs T3's sign-in URL to the t3boatd log so the user can \
+                 open and approve it from any browser. Restarts T3 on the machine, so it refuses while an \
+                 agent works there."
+            },
             json!({ "machine": machine }),
             &["machine"],
         ),
@@ -343,6 +371,20 @@ fn tool_list() -> Value {
             &["machine"],
         ),
         tool(
+            "other_sandboxes",
+            "Lists Boat sandboxes on the account that this t3boat does not manage yet, including \
+             adoptable machines created by another computer's t3boat.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "adopt_machine",
+            "Adopts an existing t3boat Boat sandbox (by its sandbox_id from other_sandboxes) so \
+             this t3boat manages its proxy, sleep captures, and tailnet access.",
+            json!({ "sandbox_id": { "type": "string", "description": "Boat sandbox id from other_sandboxes" } }),
+            &["sandbox_id"],
+        ),
+        tool(
             "delete_machine",
             "Permanently deletes a machine and everything on it, including work not pushed anywhere. Ask \
              the user first. Refuses while an agent or build is working there; `discard: true` deletes \
@@ -357,21 +399,50 @@ impl Call {
     /// The answer when the call outlasts `WAIT`.
     fn pending(&self) -> String {
         match self {
-            Self::CreateMachine { name, .. } => format!(
-                "Creating {name}, about a minute. list_machines shows its progress. When it is ready, \
-                 T3 Code asks the user to add it as a backend."
-            ),
-            Self::SignInAgent { machine, agent } => format!(
-                "The {agent} sign-in for {machine} is open in the browser; the user must click Authorize. \
-                 list_machines stops listing {agent} under signedOut once done."
-            ),
+            Self::CreateMachine { name, .. } => {
+                if cfg!(feature = "desktop") {
+                    format!(
+                        "Creating {name}, about a minute. list_machines shows its progress. When it is ready, \
+                         T3 Code asks the user to add it as a backend."
+                    )
+                } else {
+                    format!(
+                        "Creating {name}, about a minute. list_machines shows its progress. When it is ready, \
+                         call pair_phone to pair it on your tailnet."
+                    )
+                }
+            }
+            Self::SignInAgent { machine, agent } => {
+                if cfg!(feature = "desktop") {
+                    format!(
+                        "The {agent} sign-in for {machine} is open in the browser; the user must click Authorize. \
+                         list_machines stops listing {agent} under signedOut once done."
+                    )
+                } else {
+                    format!(
+                        "Starting {agent} sign-in for {machine}. Check the t3boatd log for the sign-in URL and \
+                         SSH callback-forwarding command when it appears, forward the callback port, and \
+                         authorize in a browser. list_machines stops listing {agent} under signedOut once done."
+                    )
+                }
+            }
             Self::AddProject { machine, project } => format!(
                 "Still cloning {project} onto {machine}; list_machines shows its progress under the machine's projects."
             ),
-            Self::TurnOnConnect { machine } => format!(
-                "T3's sign-in page for {machine} is open in the browser; the user must approve it. \
-                 machine_details shows connect: true once other devices can reach it."
-            ),
+            Self::TurnOnConnect { machine } => {
+                if cfg!(feature = "desktop") {
+                    format!(
+                        "T3's sign-in page for {machine} is open in the browser; the user must approve it. \
+                         machine_details shows connect: true once other devices can reach it."
+                    )
+                } else {
+                    format!(
+                        "Starting T3 Connect sign-in for {machine}. Check the t3boatd log for the sign-in URL \
+                         when it appears, then open and approve it in a browser. machine_details shows \
+                         connect: true once other devices can reach it."
+                    )
+                }
+            }
             _ => "Still running in the background; list_machines shows the machine's state.".into(),
         }
     }
@@ -399,11 +470,19 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
         Call::ListMachines {} => json!({ "machines": app.views(), "costs": app.costs() }).to_string(),
         Call::CreateMachine { name, size, projects } => {
             let m = app.create_machine(&name, size.as_deref().unwrap_or("default"), projects).await?;
-            format!(
-                "Created {} ({}). T3 Code now asks the user to add it as a backend; tell them to confirm.",
-                m.record().name,
-                m.id()
-            )
+            if cfg!(feature = "desktop") {
+                format!(
+                    "Created {} ({}). T3 Code now asks the user to add it as a backend; tell them to confirm.",
+                    m.record().name,
+                    m.id()
+                )
+            } else {
+                format!(
+                    "Created {} ({}). Call pair_phone to pair it on your tailnet.",
+                    m.record().name,
+                    m.id()
+                )
+            }
         }
         Call::ListProjects {} => serde_json::to_string(&app.local_projects().await?)?,
         Call::AddProject { machine, project } => {
@@ -507,6 +586,11 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
                  environment id: remove that entry first, or add this URL to it as another route.",
                 m.record().name
             )
+        }
+        Call::OtherSandboxes {} => serde_json::to_string(&app.other_sandboxes().await?)?,
+        Call::AdoptMachine { sandbox_id } => {
+            let m = app.adopt_machine(&sandbox_id).await?;
+            format!("Adopted {} ({}).", m.record().name, m.id())
         }
         Call::DeleteMachine { machine, discard } => {
             let m = app.machine(&machine)?;
@@ -762,8 +846,8 @@ mod tests {
     async fn lists_tools_and_rejects_unknown_methods() {
         let tools = rpc("tools/list", json!({})).await["result"]["tools"].clone();
         let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 18);
-        assert!(["sign_in_agent", "pair_phone", "delete_machine"].iter().all(|n| names.contains(n)));
+        assert_eq!(names.len(), 20);
+        assert!(["sign_in_agent", "pair_phone", "adopt_machine", "delete_machine"].iter().all(|n| names.contains(n)));
         assert_eq!(rpc("ping", json!({})).await["result"], json!({}));
         assert_eq!(rpc("resources/list", json!({})).await["error"]["code"], -32601);
     }
